@@ -6,6 +6,7 @@ const {
   removeWishlistItem: removeWishlistItemDb,
   clearWishlist: clearWishlistDb,
 } = require("../../models/wishlist.model");
+const { getMostFavouritedProducts } = require("../../models/favourite.model");
 
 function parsePositiveInteger(value) {
   const parsed = Number(value);
@@ -109,11 +110,40 @@ async function clearWishlist(req, res) {
   }
 }
 
+async function getAdminFavourites(req, res) {
+  try {
+    const { page, limit, search, category, sortBy, sortOrder } = req.query || {};
+    const result = await getMostFavouritedProducts({
+      page,
+      limit,
+      search,
+      categoryId: category,
+      sortBy,
+      sortOrder,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Admin favourites fetched successfully",
+      data: result.items,
+      pagination: result.pagination,
+      stats: result.stats,
+    });
+  } catch (error) {
+    console.error("Get admin favourites error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error fetching favourite products",
+    });
+  }
+}
+
 module.exports = {
   getWishlist,
   addWishlistItem,
   removeWishlistItem,
   toggleWishlist,
   clearWishlist,
+  getAdminFavourites,
 };
 

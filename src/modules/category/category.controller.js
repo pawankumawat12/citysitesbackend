@@ -10,6 +10,8 @@ const {
   createCategory,
   updateCategory,
   deleteCategory,
+  bulkUpdateCategoryStatus,
+  bulkDeleteCategories,
   isCategoryAncestor,
 } = require("../../models/category.model");
 const { countProductsByCategory } = require("../../models/product.model");
@@ -225,10 +227,59 @@ async function deleteCategoryHandler(req, res) {
   }
 }
 
+async function bulkUpdateCategoryStatusHandler(req, res) {
+  try {
+    const { ids, isActive } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids must be a non-empty array of category IDs" });
+    }
+    if (typeof isActive !== "boolean") {
+      return res.status(400).json({ message: "isActive boolean is required" });
+    }
+
+    const updatedCategories = await bulkUpdateCategoryStatus(ids, isActive);
+    return res.status(200).json({
+      message: `Successfully updated ${updatedCategories.length} category(ies)`,
+      count: updatedCategories.length,
+      data: updatedCategories,
+    });
+  } catch (error) {
+    console.error("Bulk update category status error:", error);
+    return res.status(500).json({ message: "Server error updating categories" });
+  }
+}
+
+async function bulkDeleteCategoriesHandler(req, res) {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids must be a non-empty array of category IDs" });
+    }
+
+    const result = await bulkDeleteCategories(ids);
+    let message = `Successfully deleted ${result.deletedCount} category(ies).`;
+    if (result.skippedCount > 0) {
+      message += ` ${result.skippedCount} category(ies) were skipped because they have products or subcategories assigned.`;
+    }
+
+    return res.status(200).json({
+      message,
+      count: result.deletedCount,
+      skippedCount: result.skippedCount,
+      skippedReasons: result.skippedReasons,
+    });
+  } catch (error) {
+    console.error("Bulk delete categories error:", error);
+    return res.status(500).json({ message: "Server error deleting categories" });
+  }
+}
+
 module.exports = {
   listCategories,
   getCategoryById,
   createCategoryHandler,
   updateCategoryHandler,
   deleteCategoryHandler,
+  bulkUpdateCategoryStatusHandler,
+  bulkDeleteCategoriesHandler,
 };

@@ -22,6 +22,8 @@ const {
   editCustomer,
   removeCustomer,
   toggleCustomerStatus,
+  bulkUpdateCustomerStatusHandler,
+  bulkDeleteCustomersHandler,
   submitBlockedSupportRequest,
   getBlockedSupportRequests,
   resolveBlockedSupportRequest,
@@ -32,6 +34,10 @@ const {
 } = require("../../../middleware/auth.middleware");
 const { countAdmins } = require("../../models/auth.model");
 const { uploadImage } = require("../../../middleware/upload");
+const {
+  otpSendLimiter,
+  otpVerifyLimiter,
+} = require("../../../middleware/rateLimiter");
 
 router.post("/login", login);
 router.post("/admin-login", adminLogin);
@@ -50,13 +56,13 @@ async function allowInitialAdmin(req, res, next) {
   }
 }
 
-router.post("/send-otp", sendOtp);
+router.post("/send-otp", otpSendLimiter, sendOtp);
 router.post("/forgot-password", forgotPassword);
 router.get("/reset-password/:accessToken", verifyPasswordResetToken);
 router.post("/reset-password/:accessToken", resetPassword);
 router.post("/register", register);
 
-router.post("/verify-otp", verifyOtp);
+router.post("/verify-otp", otpVerifyLimiter, verifyOtp);
 router.get("/me", verifyToken, getMe);
 router.put(
   "/profile",
@@ -67,12 +73,14 @@ router.put(
 
 // Email Change with OTP
 router.post("/request-email-change", verifyToken, requestEmailChange);
-router.post("/resend-email-change-otp", verifyToken, resendEmailChangeOtp);
-router.post("/verify-email-change", verifyToken, verifyEmailChange);
+router.post("/resend-email-change-otp", verifyToken, otpSendLimiter, resendEmailChangeOtp);
+router.post("/verify-email-change", verifyToken, otpVerifyLimiter, verifyEmailChange);
 router.post("/cancel-email-change", verifyToken, cancelEmailChange);
 
 // Customer Management (Admin)
 router.get("/customers", verifyToken, isAdmin, getCustomers);
+router.post("/customers/bulk-status", verifyToken, isAdmin, bulkUpdateCustomerStatusHandler);
+router.post("/customers/bulk-delete", verifyToken, isAdmin, bulkDeleteCustomersHandler);
 router.put("/customers/:id", verifyToken, isAdmin, editCustomer);
 router.delete("/customers/:id", verifyToken, isAdmin, removeCustomer);
 router.patch("/customers/:id/status", verifyToken, isAdmin, toggleCustomerStatus);

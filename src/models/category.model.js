@@ -130,6 +130,59 @@ async function isCategoryAncestor(ancestorId, descendantId) {
   return false;
 }
 
+function bulkUpdateCategoryStatus(ids, isActive) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve([]);
+  return db("categories")
+    .whereIn("id", ids)
+    .update({ is_active: Boolean(isActive), updated_at: new Date() })
+    .returning(CATEGORY_COLUMNS);
+}
+
+async function bulkDeleteCategories(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { deletedCount: 0, skippedCount: 0, skippedReasons: [] };
+  }
+
+  // Find categories that have products
+  const productsInCategory = await db("products")
+    .whereIn("category_id", ids)
+    .select("category_id")
+    .groupBy("category_id");
+  const categoriesWithProducts = new Set(productsInCategory.map((p) => Number(p.category_id)));
+
+  // Find categories that have child categories
+  const childrenCategories = await db("categories")
+    .whereIn("parent_category_id", ids)
+    .select("parent_category_id")
+    .groupBy("parent_category_id");
+  const categoriesWithChildren = new Set(childrenCategories.map((c) => Number(c.parent_category_id)));
+
+  const safeIdsToDelete = [];
+  const skippedReasons = [];
+
+  for (const rawId of ids) {
+    const id = Number(rawId);
+    if (categoriesWithProducts.has(id)) {
+      skippedReasons.push({ id, reason: "Category has active products assigned" });
+    } else if (categoriesWithChildren.has(id)) {
+      skippedReasons.push({ id, reason: "Category has subcategories" });
+    } else {
+      safeIdsToDelete.push(id);
+    }
+  }
+
+  let deletedCount = 0;
+  if (safeIdsToDelete.length > 0) {
+    deletedCount = await db("categories").whereIn("id", safeIdsToDelete).del();
+  }
+
+  return {
+    deletedCount,
+    skippedCount: skippedReasons.length,
+    skippedReasons,
+  };
+}
+
 module.exports = {
   findCategoryById,
   findCategories,
@@ -138,5 +191,7 @@ module.exports = {
   createCategory,
   updateCategory,
   deleteCategory,
+  bulkUpdateCategoryStatus,
+  bulkDeleteCategories,
   isCategoryAncestor,
 };

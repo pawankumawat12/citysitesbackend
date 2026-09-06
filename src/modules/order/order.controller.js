@@ -4,6 +4,7 @@ const {
   findOrderById,
   findAllOrders,
   updateOrderStatus,
+  bulkUpdateOrderStatus,
   updateItemProductionStatus,
   cancelOrder,
   updateOrderPaymentStatus,
@@ -19,10 +20,11 @@ const {
   emitToUser,
   emitToOrder,
 } = require("../../socket/socket.service");
-const { createRazorpayOrder } = require("../../services/razorpayService");
-const { finalizePaidOrder } = require("../../services/orderPayment.service");
+const { createRazorpayOrder, initiateRazorpayRefund } = require("../../services/razorpayService");
+const { finalizePaidOrder, handleRefundProcessed } = require("../../services/orderPayment.service");
 const db = require("../../../config/db");
 const { incrementOfferUsage } = require("../../models/offer.model");
+const { generateInvoicePdf } = require("../../services/invoice.service");
 
 async function createOrder(req, res) {
   try {
@@ -82,56 +84,79 @@ async function createOrder(req, res) {
       req.user.name ||
       "Customer";
 
-    let finalCustomerPhone =
-      inputPhone ||
-      req.user.phone ||
-      "";
+    // Helper for Indian 10-digit phone normalization & validation (/^[6-9]\d{9}$/)
+    const normalizeIndianPhone = (raw) => {
+      if (!raw) return "";
+      let digits = String(raw).replace(/\D/g, "");
+      if (digits.length === 12 && digits.startsWith("91")) {
+        digits = digits.slice(2);
+      }
+      if (digits.length === 11 && digits.startsWith("0")) {
+        digits = digits.slice(1);
+      }
+      return digits;
+    };
+    const isValidIndianPhone = (val) => /^[6-9]\d{9}$/.test(val);
+
+    let savedAddressData = null;
+    if (addressId) {
+      const addr = await Address.getAddressById(addressId, userId);
+      if (addr && Number(addr.user_id) === Number(userId)) {
+        savedAddressData = addr;
+      }
+    }
+
+    // Prioritize entered phone first, then saved address phone, then user profile phone
+    const enteredPhone = normalizeIndianPhone(inputPhone);
+    let finalCustomerPhone = "";
+
+    if (isValidIndianPhone(enteredPhone)) {
+      finalCustomerPhone = enteredPhone;
+    } else {
+      const savedAddrPhone = normalizeIndianPhone(savedAddressData?.phone_number);
+      if (isValidIndianPhone(savedAddrPhone)) {
+        finalCustomerPhone = savedAddrPhone;
+      } else {
+        const userSavedPhone = normalizeIndianPhone(req.user?.phone);
+        if (isValidIndianPhone(userSavedPhone)) {
+          finalCustomerPhone = userSavedPhone;
+        }
+      }
+    }
+
+    if (!isValidIndianPhone(finalCustomerPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "A valid 10-digit Indian mobile number (starting with 6, 7, 8, or 9) is required for delivery.",
+      });
+    }
 
     // 3. GET SAVED ADDRESS
-    if (addressId) {
-      const savedAddress =
-        await Address.getAddressById(
-          addressId,
-          userId
-        );
+    if (savedAddressData) {
+      finalCustomerName =
+        savedAddressData.receiver_name ||
+        finalCustomerName;
 
-      if (
-        savedAddress &&
-        Number(savedAddress.user_id) === Number(userId)
-      ) {
-        finalCustomerName =
-          savedAddress.receiver_name ||
-          finalCustomerName;
+      const parts = [
+        savedAddressData.house_number,
+        savedAddressData.building_name,
+        savedAddressData.floor
+          ? `Floor ${savedAddressData.floor}`
+          : null,
+        savedAddressData.landmark
+          ? `Near ${savedAddressData.landmark}`
+          : null,
+        savedAddressData.formatted_address ||
+        `${savedAddressData.city}, ${savedAddressData.state} - ${savedAddressData.pincode}`,
+      ].filter(Boolean);
 
-        finalCustomerPhone =
-          savedAddress.phone_number ||
-          finalCustomerPhone;
+      finalShippingAddress =
+        parts.join(", ");
 
-        const parts = [
-          savedAddress.house_number,
-
-          savedAddress.building_name,
-
-          savedAddress.floor
-            ? `Floor ${savedAddress.floor}`
-            : null,
-
-          savedAddress.landmark
-            ? `Near ${savedAddress.landmark}`
-            : null,
-
-          savedAddress.formatted_address ||
-          `${savedAddress.city}, ${savedAddress.state} - ${savedAddress.pincode}`,
-        ].filter(Boolean);
-
-        finalShippingAddress =
-          parts.join(", ");
-
-        // IMPORTANT:
-        // Save complete address snapshot in order
-        finalDeliveryJson =
-          savedAddress;
-      }
+      // IMPORTANT:
+      // Save complete address snapshot in order
+      finalDeliveryJson =
+        savedAddressData;
     }
 
     // 4. VALIDATE DELIVERY ADDRESS
@@ -537,7 +562,12 @@ async function verifyRazorpayPayment(req, res) {
     }
 
     // 7. FINALIZE PAYMENT SAFELY & IDEMPOTENTLY
-    const { order: finalOrder, alreadyPaid } = await finalizePaidOrder({
+    const {
+      order: finalOrder,
+      alreadyPaid,
+      inventoryConflict,
+      autoRefund,
+    } = await finalizePaidOrder({
       orderId: order.id,
       razorpayOrderId: razorpay_order_id,
       razorpayPaymentId: razorpay_payment_id,
@@ -545,11 +575,20 @@ async function verifyRazorpayPayment(req, res) {
       source: "api",
     });
 
+    let message = "Payment verified successfully.";
+    if (alreadyPaid) {
+      message = "Payment is already verified.";
+    } else if (inventoryConflict) {
+      message =
+        finalOrder.payment_status === "Refunded"
+          ? "Payment received, but items were out of stock. A full refund has been initiated."
+          : "Payment received, but items were out of stock. Our team will contact you or process a refund.";
+    }
+
     return res.status(200).json({
       success: true,
-      message: alreadyPaid
-        ? "Payment is already verified."
-        : "Payment verified successfully.",
+      conflict: Boolean(inventoryConflict),
+      message,
       data: {
         orderId: finalOrder.id,
         orderNumber: finalOrder.order_number,
@@ -557,6 +596,13 @@ async function verifyRazorpayPayment(req, res) {
         orderStatus: finalOrder.status,
         transactionId: finalOrder.transaction_id,
         totalAmount: finalOrder.total_amount,
+        inventoryConflict: Boolean(inventoryConflict),
+        refundStatus:
+          autoRefund && autoRefund.id
+            ? "Refunded"
+            : inventoryConflict
+            ? "Pending Manual Refund"
+            : null,
       },
     });
   } catch (error) {
@@ -886,7 +932,7 @@ async function cancelUserOrder(req, res) {
 async function updatePaymentStatusController(req, res) {
   try {
     const orderId = Number(req.params.id);
-    const { paymentStatus } = req.body;
+    const { paymentStatus, refundReason } = req.body || {};
 
     const allowed = ["Pending", "Paid", "Failed", "Refunded"];
     if (!paymentStatus || !allowed.includes(paymentStatus)) {
@@ -896,8 +942,58 @@ async function updatePaymentStatusController(req, res) {
       });
     }
 
-    const updated = await updateOrderPaymentStatus(orderId, paymentStatus);
     const order = await findOrderById(orderId);
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    // If changing to Refunded for an online payment with transaction ID
+    if (
+      paymentStatus === "Refunded" &&
+      order.payment_status !== "Refunded" &&
+      order.payment_method === "Online Payment" &&
+      order.transaction_id
+    ) {
+      let refundResult;
+      try {
+        refundResult = await initiateRazorpayRefund({
+          paymentId: order.transaction_id,
+          amount: order.total_amount,
+          notes: {
+            order_id: String(order.id),
+            order_number: order.order_number || String(order.id),
+            reason: refundReason || "Admin marked order as Refunded",
+          },
+        });
+      } catch (refundErr) {
+        console.error("Razorpay refund error during status update:", refundErr);
+        return res.status(400).json({
+          success: false,
+          message: `Failed to initiate Razorpay refund: ${refundErr.message}`,
+        });
+      }
+
+      const updated = await handleRefundProcessed({
+        orderId: order.id,
+        razorpayPaymentId: order.transaction_id,
+        refundEntity: refundResult,
+        notes: {
+          local_order_id: order.id,
+          reason: refundReason,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Payment refunded successfully via Razorpay",
+        data: updated,
+      });
+    }
+
+    const updated = await updateOrderPaymentStatus(orderId, paymentStatus);
 
     // Notify Customer in real-time
     if (order && order.user_id) {
@@ -941,6 +1037,354 @@ async function updatePaymentStatusController(req, res) {
   }
 }
 
+async function refundOrderController(req, res) {
+  try {
+    const orderId = Number(req.params.id);
+    const { reason = "Admin manual refund", amount } = req.body || {};
+
+    if (!orderId) {
+      return res.status(400).json({ success: false, message: "Invalid order ID" });
+    }
+
+    const order = await findOrderById(orderId);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    if (order.payment_status === "Refunded") {
+      return res.status(400).json({
+        success: false,
+        message: "Order is already marked as Refunded",
+      });
+    }
+
+    if (order.payment_method !== "Online Payment" || !order.transaction_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Refund via payment gateway is only available for online orders with transaction ID.",
+      });
+    }
+
+    const refundAmount = amount ? Number(amount) : Number(order.total_amount);
+    let refundResult;
+    try {
+      refundResult = await initiateRazorpayRefund({
+        paymentId: order.transaction_id,
+        amount: refundAmount,
+        notes: {
+          order_id: String(order.id),
+          order_number: order.order_number || String(order.id),
+          reason,
+        },
+      });
+    } catch (refundErr) {
+      console.error("Razorpay refund error:", refundErr);
+      return res.status(400).json({
+        success: false,
+        message: `Razorpay refund failed: ${refundErr.message}`,
+      });
+    }
+
+    const updatedOrder = await handleRefundProcessed({
+      orderId: order.id,
+      razorpayPaymentId: order.transaction_id,
+      refundEntity: refundResult,
+      notes: {
+        local_order_id: order.id,
+        reason,
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Refund processed successfully via Razorpay",
+      data: updatedOrder,
+    });
+  } catch (error) {
+    console.error("Refund order controller error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to process refund",
+    });
+  }
+}
+
+async function retryPaymentController(req, res) {
+  try {
+    const orderId = Number(req.params.id);
+    const userId = req.user.id;
+
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID.",
+      });
+    }
+
+    // 1. Fetch order and check ownership
+    let query = db("orders").where({ id: orderId });
+    if (req.user.role !== "admin") {
+      query = query.andWhere({ user_id: userId });
+    }
+    const order = await query.first();
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    // 2. Validate payment method
+    if (order.payment_method !== "Online Payment") {
+      return res.status(400).json({
+        success: false,
+        message: "This order does not require online payment.",
+      });
+    }
+
+    // 3. Check if already paid or cancelled
+    if (order.payment_status === "Paid") {
+      return res.status(400).json({
+        success: false,
+        message: "This order has already been paid.",
+      });
+    }
+
+    if (order.status === "Cancelled") {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot pay for a cancelled order.",
+      });
+    }
+
+    // 4. Pre-check inventory availability for order items
+    const items = await db("order_items").where({ order_id: order.id });
+    for (const item of items) {
+      if (item.availability_type !== "MADE_TO_ORDER") {
+        const product = await db("products").where({ id: item.product_id }).first();
+        if (!product || !product.is_active) {
+          return res.status(409).json({
+            success: false,
+            message: `Item "${item.product_name}" is no longer available.`,
+            outOfStock: true,
+          });
+        }
+        if (Number(product.stock) < Number(item.quantity)) {
+          return res.status(409).json({
+            success: false,
+            message: `Item "${item.product_name}" is out of stock (Available: ${product.stock}, Required: ${item.quantity}).`,
+            outOfStock: true,
+          });
+        }
+      }
+    }
+
+    // 5. Create new Razorpay order
+    const razorpayOrder = await createRazorpayOrder({
+      amount: Number(order.total_amount),
+      receipt: `${order.order_number || order.id}-R${Date.now()}`.slice(-40),
+      notes: {
+        local_order_id: String(order.id),
+        order_number: order.order_number || String(order.id),
+        user_id: String(order.user_id),
+        is_retry: "true",
+      },
+    });
+
+    // 6. Update local order with new razorpay_order_id
+    await db("orders")
+      .where({ id: order.id })
+      .update({
+        razorpay_order_id: razorpayOrder.id,
+        updated_at: db.fn.now(),
+      });
+
+    return res.status(200).json({
+      success: true,
+      message: "Payment checkout initialized.",
+      data: {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        razorpayOrderId: razorpayOrder.id,
+        razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+        amount: Number(order.total_amount),
+        currency: "INR",
+        customerName: order.customer_name,
+        customerEmail: order.customer_email,
+        customerPhone: order.customer_phone,
+      },
+    });
+  } catch (error) {
+    console.error("Retry payment controller error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to initialize payment retry.",
+    });
+  }
+}
+
+async function bulkUpdateOrderStatusHandler(req, res) {
+  try {
+    const { ids, status, cancelReason } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: "ids must be a non-empty array of order IDs" });
+    }
+
+    const allowedStatuses = ["Preparing", "Out for Delivery", "Delivered", "Cancelled"];
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status '${status}'. Allowed statuses: ${allowedStatuses.join(", ")}`,
+      });
+    }
+
+    const result = await bulkUpdateOrderStatus(ids, status, { cancelReason });
+
+    for (const o of result.updatedOrders) {
+      if (o.user_id) {
+        emitToUser(o.user_id, "order_status_updated", {
+          orderId: o.id,
+          status: o.status,
+          paymentStatus: o.payment_status,
+        });
+      }
+      emitToOrder(o.id, "order_status_updated", {
+        orderId: o.id,
+        status: o.status,
+        paymentStatus: o.payment_status,
+      });
+    }
+
+    emitToAdmin("admin_order_status_updated", {
+      count: result.updatedCount,
+      status,
+    });
+
+    let message = `Successfully updated ${result.updatedCount} order(s) to '${status}'.`;
+    if (result.skippedUnpaidOnline.length > 0) {
+      message += ` ${result.skippedUnpaidOnline.length} unpaid online order(s) were protected and skipped.`;
+    }
+
+    return res.status(200).json({
+      success: true,
+      message,
+      updatedCount: result.updatedCount,
+      skippedCount: result.skippedCount,
+      skippedUnpaidOnline: result.skippedUnpaidOnline,
+      otherSkipped: result.otherSkipped,
+      data: result.updatedOrders,
+    });
+  } catch (error) {
+    console.error("Bulk update order status error:", error);
+    return res.status(500).json({ success: false, message: error.message || "Failed to update orders" });
+  }
+}
+
+async function exportOrdersHandler(req, res) {
+  try {
+    const { status, search } = req.query || {};
+    const ordersResult = await findAllOrders({
+      page: 1,
+      limit: 10000,
+      status,
+      search,
+    });
+
+    const orders = ordersResult?.orders || [];
+
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return "";
+      let str = typeof val === "object" ? JSON.stringify(val) : String(val);
+      if (str.includes('"') || str.includes(",") || str.includes("\n") || str.includes("\r")) {
+        str = `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const headers = [
+      "Order ID",
+      "Order Number",
+      "Customer Name",
+      "Customer Email",
+      "Customer Phone",
+      "Subtotal (₹)",
+      "Delivery Fee (₹)",
+      "Total Amount (₹)",
+      "Payment Method",
+      "Payment Status",
+      "Order Status",
+      "Created At",
+    ];
+
+    const rows = orders.map((o) => [
+      o.id,
+      o.order_number || "",
+      o.customer_name || "",
+      o.customer_email || "",
+      o.customer_phone || "",
+      o.subtotal || 0,
+      o.delivery_fee || 0,
+      o.total_amount || 0,
+      o.payment_method || "",
+      o.payment_status || "",
+      o.status || "",
+      o.created_at ? new Date(o.created_at).toISOString() : "",
+    ]);
+
+    const csvContent =
+      headers.map(escapeCsv).join(",") +
+      "\r\n" +
+      rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="orders-export-${dateStr}.csv"`);
+    // Prepend UTF-8 BOM
+    return res.status(200).send("\uFEFF" + csvContent);
+  } catch (error) {
+    console.error("Export orders error:", error);
+    return res.status(500).json({ success: false, message: "Failed to export orders" });
+  }
+}
+
+async function downloadInvoiceHandler(req, res) {
+  try {
+    const orderId = Number(req.params.id);
+    if (!orderId) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order ID",
+      });
+    }
+
+    // Access control: admins can download invoice for any order; customers can only download their own
+    const userId = req.user.role === "admin" ? null : req.user.id;
+    const order = await findOrderById(orderId, userId);
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found or you do not have permission to access this invoice.",
+      });
+    }
+
+    const filename = `invoice-${order.order_number || order.id}.pdf`;
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    await generateInvoicePdf(order, res);
+  } catch (error) {
+    console.error("Download invoice error:", error);
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to generate invoice",
+      });
+    }
+  }
+}
+
 module.exports = {
   createOrder,
   getUserOrders,
@@ -950,7 +1394,12 @@ module.exports = {
   markItemProduced,
   cancelUserOrder,
   updatePaymentStatusController,
+  refundOrderController,
   acceptOrderController,
   rejectOrderController,
-  verifyRazorpayPayment
+  verifyRazorpayPayment,
+  retryPaymentController,
+  bulkUpdateOrderStatusHandler,
+  exportOrdersHandler,
+  downloadInvoiceHandler,
 };

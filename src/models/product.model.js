@@ -192,6 +192,19 @@ function deleteProduct(id) {
   return db("products").where({ id }).del();
 }
 
+function bulkUpdateProductStatus(ids, isActive) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve([]);
+  return db("products")
+    .whereIn("id", ids)
+    .update({ is_active: Boolean(isActive), updated_at: new Date() })
+    .returning(["id", "name", "is_active"]);
+}
+
+function bulkDeleteProducts(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve(0);
+  return db("products").whereIn("id", ids).del();
+}
+
 module.exports = {
   findProductById,
   findProducts,
@@ -200,6 +213,8 @@ module.exports = {
   createProduct,
   updateProduct,
   deleteProduct,
+  bulkUpdateProductStatus,
+  bulkDeleteProducts,
   attachOffersToProduct,
   attachOffersToProducts,
   getApplicableOffersForProduct,

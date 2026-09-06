@@ -22,6 +22,8 @@ const {
   updateUser,
   deleteUser,
   listCustomers,
+  bulkUpdateCustomerStatus,
+  bulkDeleteCustomers,
   createBlockedCustomerRequest,
   listBlockedCustomerRequests,
   findBlockedRequestById,
@@ -65,7 +67,7 @@ const issueVerificationOtp = async (
   updateRegistration,
   { resetResendPolicy = false, templateSlug = "login-verification-otp" } = {}
 ) => {
-  const otp = Math.floor(1000 + Math.random() * 9000).toString();
+  const otp = crypto.randomInt(100000, 1000000).toString();
   // Keep the existing OTP lifetime unchanged.
   const expireAt = new Date(Date.now() + 15 * 60 * 1000);
 
@@ -74,6 +76,7 @@ const issueVerificationOtp = async (
     otp,
     expire_at: expireAt,
     otp_sent_at: now,
+    otp_attempts: 0,
     ...(resetResendPolicy
       ? { otp_resend_count: 0, otp_resend_locked_until: null }
       : {}),
@@ -146,13 +149,14 @@ const resendVerificationOtp = async (
     throw error;
   }
 
-  const otp = Math.floor(1000 + Math.random() * 9000).toString();
+  const otp = crypto.randomInt(100000, 1000000).toString();
   const expireAt = new Date(now.getTime() + 15 * 60 * 1000);
   const nextCount = resendCount + 1;
   await updateRegistration(registration.id, {
     otp,
     expire_at: expireAt,
     otp_sent_at: now,
+    otp_attempts: 0,
     otp_resend_count: nextCount,
     otp_resend_locked_until: null,
   });
@@ -337,7 +341,7 @@ const sendOtp = async (req, res) => {
       success: true,
       message: "Verification code resent to your email.",
       data: {
-        messageId: resend.result.messageId,
+        messageId: resend.result?.messageId || (resend.result?.jobId ? `queue-${resend.result.jobId}` : "queued"),
         resendCount: resend.resendCount,
         attemptsRemaining: resend.attemptsRemaining,
         retryAfter: OTP_RESEND_COOLDOWN_MS / 1000,
@@ -375,7 +379,7 @@ const verifyOtp = async (req, res) => {
     if (!email || !otp) {
       return res.status(400).json({
         success: false,
-        message: "Email and 4-digit verification code are required.",
+        message: "Email and 6-digit verification code are required.",
       });
     }
 
@@ -403,6 +407,20 @@ const verifyOtp = async (req, res) => {
       });
     }
 
+    // Check failed attempts limit before checking expiry/matching
+    const currentAttempts = Number(user.otp_attempts || 0);
+    if (currentAttempts >= 5) {
+      await updateUser(user.id, {
+        otp: null,
+        expire_at: null,
+        otp_attempts: 0,
+      });
+      return res.status(400).json({
+        success: false,
+        message: "Too many failed verification attempts. Your code has been invalidated. Please request a new code.",
+      });
+    }
+
     if (!user.expire_at || new Date() > new Date(user.expire_at)) {
       return res.status(400).json({
         success: false,
@@ -411,9 +429,27 @@ const verifyOtp = async (req, res) => {
     }
 
     if (String(user.otp).trim() !== String(otp).trim()) {
+      const nextAttempts = currentAttempts + 1;
+      if (nextAttempts >= 5) {
+        await updateUser(user.id, {
+          otp: null,
+          expire_at: null,
+          otp_attempts: 0,
+        });
+        return res.status(400).json({
+          success: false,
+          message: "Too many failed verification attempts. Your code has been invalidated. Please request a new code.",
+        });
+      }
+
+      await updateUser(user.id, {
+        otp_attempts: nextAttempts,
+      });
+
+      const remaining = 5 - nextAttempts;
       return res.status(400).json({
         success: false,
-        message: "Invalid verification code. Please check the 4-digit code sent to your email.",
+        message: `Invalid verification code. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining before code invalidation.`,
       });
     }
 
@@ -423,9 +459,11 @@ const verifyOtp = async (req, res) => {
     // Set secure HttpOnly refreshToken cookie
     res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
+    // Clear OTP and reset attempts so OTP cannot be reused
     await updateUser(user.id, {
       otp: null,
       expire_at: null,
+      otp_attempts: 0,
       access_token: accessToken,
       is_email_verified: true,
     });
@@ -530,7 +568,7 @@ async function register(req, res) {
           success: true,
           message: "Verification code sent to your email.",
           data: {
-            messageId: result.messageId,
+            messageId: result?.messageId || (result?.jobId ? `queue-${result.jobId}` : "queued"),
             email: normalizedEmail,
             requiresVerification: true,
           },
@@ -574,7 +612,7 @@ async function register(req, res) {
       success: true,
       message: "User registered successfully. Verification code sent to your email.",
       data: {
-        messageId: result.messageId,
+        messageId: result?.messageId || (result?.jobId ? `queue-${result.jobId}` : "queued"),
         email: normalizedEmail,
         requiresVerification: true,
       },
@@ -726,7 +764,7 @@ async function login(req, res) {
             "Your email is not verified yet. A fresh 4-digit verification code has been sent to your email.",
           data: {
             email: user.email,
-            messageId: otpResult.messageId,
+            messageId: otpResult?.messageId || (otpResult?.jobId ? `queue-${otpResult.jobId}` : "queued"),
           },
         });
       } catch (otpErr) {
@@ -805,7 +843,7 @@ async function adminLogin(req, res) {
     });
     return res.status(200).json({
       message: "Credentials verified. OTP sent.",
-      data: { messageId: result.messageId },
+      data: { messageId: result?.messageId || (result?.jobId ? `queue-${result.jobId}` : "queued") },
     });
   } catch (error) {
     console.error("Admin login error:", error);
@@ -1022,7 +1060,7 @@ const requestEmailChange = async (req, res) => {
       resendCount = 1;
     }
 
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const expireAt = new Date(now.getTime() + 10 * 60 * 1000); // 10 minutes
 
     await db("users")
@@ -1105,7 +1143,7 @@ const resendEmailChangeOtp = async (req, res) => {
       lockedUntil = new Date(now.getTime() + OTP_RESEND_LOCK_MS);
     }
 
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const expireAt = new Date(now.getTime() + 10 * 60 * 1000);
 
     await db("users")
@@ -1372,7 +1410,7 @@ const updateProfile = async (req, res) => {
     // If customer entered a new email, trigger the OTP verification process automatically
     if (isEmailChanging) {
       const now = new Date();
-      const otp = Math.floor(1000 + Math.random() * 9000).toString();
+      const otp = crypto.randomInt(100000, 1000000).toString();
       const expireAt = new Date(now.getTime() + 10 * 60 * 1000);
 
       await db("users")
@@ -1711,6 +1749,62 @@ async function resolveBlockedSupportRequest(req, res) {
   }
 }
 
+async function bulkUpdateCustomerStatusHandler(req, res) {
+  try {
+    const { ids, isBlocked, blockReason } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: "ids must be a non-empty array of customer IDs" });
+    }
+    if (typeof isBlocked !== "boolean") {
+      return res.status(400).json({ success: false, message: "isBlocked boolean is required" });
+    }
+
+    const updatedUsers = await bulkUpdateCustomerStatus(ids, { isBlocked, blockReason });
+
+    for (const u of updatedUsers) {
+      emitToUser(u.id, "customer_status_changed", {
+        userId: u.id,
+        is_blocked: u.is_blocked,
+        is_active: u.is_active,
+        block_reason: u.block_reason,
+      });
+    }
+
+    emitToAdmin("admin_customer_status_updated", { count: updatedUsers.length });
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully ${isBlocked ? "blocked" : "unblocked"} ${updatedUsers.length} customer(s)`,
+      count: updatedUsers.length,
+      data: updatedUsers,
+    });
+  } catch (error) {
+    console.error("Bulk update customer status error:", error);
+    return res.status(500).json({ success: false, message: "Server error updating customer status" });
+  }
+}
+
+async function bulkDeleteCustomersHandler(req, res) {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ success: false, message: "ids must be a non-empty array of customer IDs" });
+    }
+
+    const deletedCount = await bulkDeleteCustomers(ids);
+    emitToAdmin("admin_customer_status_updated", { deletedCount });
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully deleted ${deletedCount} customer(s)`,
+      count: deletedCount,
+    });
+  } catch (error) {
+    console.error("Bulk delete customers error:", error);
+    return res.status(500).json({ success: false, message: "Server error deleting customers" });
+  }
+}
+
 module.exports = {
   forgotPassword,
   verifyPasswordResetToken,
@@ -1733,6 +1827,8 @@ module.exports = {
   editCustomer,
   removeCustomer,
   toggleCustomerStatus,
+  bulkUpdateCustomerStatusHandler,
+  bulkDeleteCustomersHandler,
   submitBlockedSupportRequest,
   getBlockedSupportRequests,
   resolveBlockedSupportRequest,

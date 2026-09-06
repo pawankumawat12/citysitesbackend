@@ -9,6 +9,7 @@ async function createReview(data) {
       rating: Number(data.rating),
       title: data.title ? data.title.trim() : null,
       comment: data.comment.trim(),
+      is_verified_purchase: Boolean(data.is_verified_purchase),
       is_hidden: false,
       status: "published",
       created_at: new Date(),

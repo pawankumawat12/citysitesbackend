@@ -60,7 +60,19 @@ async function sendTemplatedMail({
   emailType,
   userId = null,
   metadata = null,
+  async = false,
 }) {
+  if (async) {
+    return sendTemplatedMailBackground({
+      to,
+      templateSlug,
+      variables,
+      emailType,
+      userId,
+      metadata,
+    });
+  }
+
   const rendered = await renderEmailTemplate(templateSlug, variables);
   return sendMail({
     to,
@@ -73,10 +85,32 @@ async function sendTemplatedMail({
   });
 }
 
+async function sendTemplatedMailBackground({
+  to,
+  templateSlug,
+  variables = {},
+  emailType,
+  userId = null,
+  metadata = null,
+  maxAttempts = 3,
+}) {
+  const { enqueueEmail } = require("./emailQueue.service");
+  return enqueueEmail({
+    to,
+    templateSlug,
+    variables,
+    emailType: emailType || templateSlug,
+    userId,
+    metadata,
+    maxAttempts,
+  });
+}
+
 module.exports = {
   getTemplateBySlug,
   renderEmailTemplate,
   sendTemplatedMail,
+  sendTemplatedMailBackground,
   replaceVariables,
   htmlToText,
 };

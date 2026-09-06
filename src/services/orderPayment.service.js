@@ -6,6 +6,7 @@ const {
   emitToUser,
   emitToOrder,
 } = require("../socket/socket.service");
+const { initiateRazorpayRefund } = require("./razorpayService");
 
 /**
  * Helper to dispatch payment notifications and socket events safely.
@@ -96,6 +97,104 @@ async function notifyPaymentSuccess(order, paymentId, source = "api") {
 }
 
 /**
+ * Helper to dispatch alerts and notifications when an order was paid but items became out of stock.
+ */
+async function notifyStockConflict({
+  order,
+  outOfStockItems,
+  autoRefunded,
+  autoRefundError,
+}) {
+  try {
+    const orderNumber = order.order_number || String(order.id);
+    const amount = Number(order.total_amount || 0).toFixed(2);
+    const itemNames = outOfStockItems.map((i) => i.productName).join(", ");
+    const refundStatusText = autoRefunded
+      ? `A full refund of ₹${amount} was initiated automatically via Razorpay.`
+      : `ACTION REQUIRED: Full refund of ₹${amount} is required (${autoRefundError || "gateway balance pending"}).`;
+
+    // 1. URGENT Admin In-App Notification
+    await notificationModel.createNotification({
+      role: "admin",
+      type: "order_status",
+      title: `URGENT: Paid Order #${orderNumber} Out of Stock`,
+      message: `Customer paid ₹${amount}, but items [${itemNames}] were out of stock. ${refundStatusText}`,
+      orderId: order.id,
+      dataJson: {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        outOfStockItems,
+        autoRefunded,
+        autoRefundError,
+        paymentStatus: order.payment_status,
+        orderStatus: order.status,
+      },
+    });
+
+    // 2. Customer In-App Notification
+    if (order.user_id) {
+      const custMsg = autoRefunded
+        ? `Your payment of ₹${amount} was received, but [${itemNames}] became out of stock during checkout. A full refund has been initiated to your original payment method.`
+        : `Your payment of ₹${amount} was received, but [${itemNames}] became out of stock. Our team is processing your full refund.`;
+
+      await notificationModel.createNotification({
+        userId: order.user_id,
+        type: "order_status",
+        title: `Order #${orderNumber}: Out of Stock`,
+        message: custMsg,
+        orderId: order.id,
+        dataJson: {
+          orderId: order.id,
+          orderNumber: order.order_number,
+          paymentStatus: order.payment_status,
+          orderStatus: order.status,
+          outOfStockItems,
+          autoRefunded,
+        },
+      });
+
+      emitToUser(order.user_id, "payment_status_updated", {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        paymentStatus: order.payment_status,
+        orderStatus: order.status,
+        order,
+      });
+
+      emitToUser(order.user_id, "order_status_updated", {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        status: order.status,
+        order,
+      });
+    }
+
+    // 3. Socket.IO Admin Broadcasts
+    emitToAdmin("order_stock_conflict", {
+      order,
+      outOfStockItems,
+      autoRefunded,
+      message: `URGENT: Order #${orderNumber} paid but out of stock!`,
+    });
+
+    emitToAdmin("admin_order_updated", {
+      order,
+      message: `Order #${orderNumber} cancelled due to stock conflict`,
+    });
+
+    // 4. Socket.IO Order Room Broadcast
+    emitToOrder(order.id, "payment_status_updated", {
+      orderId: order.id,
+      orderNumber: order.order_number,
+      paymentStatus: order.payment_status,
+      orderStatus: order.status,
+    });
+  } catch (err) {
+    console.error("[OrderPaymentService] notifyStockConflict error:", err);
+  }
+}
+
+/**
  * Finalize an online order payment safely with strict row-locking idempotency.
  * Can be called by either client verification endpoint or Razorpay webhook.
  *
@@ -106,7 +205,7 @@ async function notifyPaymentSuccess(order, paymentId, source = "api") {
  * @param {string} [params.razorpaySignature] - Verification signature
  * @param {Object} [params.paymentDetails] - Raw details or metadata to record
  * @param {string} [params.source="api"] - 'api' | 'webhook'
- * @returns {Promise<{ order: Object, alreadyPaid: boolean }>}
+ * @returns {Promise<{ order: Object, alreadyPaid: boolean, inventoryConflict?: boolean, outOfStockItems?: Array }>}
  */
 async function finalizePaidOrder({
   orderId,
@@ -137,11 +236,12 @@ async function finalizePaidOrder({
       throw err;
     }
 
-    // 2. IDEMPOTENCY CHECK: If already paid, exit early without duplicating stock/cart changes
-    if (currentOrder.payment_status === "Paid") {
+    // 2. IDEMPOTENCY CHECK: If already paid or refunded, exit early without duplicating changes
+    if (currentOrder.payment_status === "Paid" || currentOrder.payment_status === "Refunded") {
       return {
         order: currentOrder,
         alreadyPaid: true,
+        inventoryConflict: false,
       };
     }
 
@@ -150,7 +250,10 @@ async function finalizePaidOrder({
       .where({ order_id: currentOrder.id })
       .forUpdate();
 
-    // 4. Decrease stock for catalog items
+    // 4. Audit inventory availability for each catalog item
+    const outOfStockItems = [];
+    const productUpdates = [];
+
     for (const item of orderItems) {
       if (item.availability_type === "MADE_TO_ORDER") {
         continue;
@@ -164,18 +267,102 @@ async function finalizePaidOrder({
         .forUpdate()
         .first();
 
-      if (product) {
-        const currentStock = Number(product.stock) || 0;
-        await trx("products")
-          .where({ id: item.product_id })
-          .update({
-            stock: Math.max(0, currentStock - quantity),
-            updated_at: trx.fn.now(),
-          });
+      const currentStock = product ? Number(product.stock) || 0 : 0;
+      const isAvailable = Boolean(product && product.is_active);
+
+      if (!isAvailable || currentStock < quantity) {
+        outOfStockItems.push({
+          productId: item.product_id,
+          productName: item.product_name,
+          requestedQuantity: quantity,
+          availableStock: currentStock,
+          isAvailable,
+        });
+      } else {
+        productUpdates.push({
+          productId: item.product_id,
+          newStock: currentStock - quantity,
+        });
       }
     }
 
-    // 5. Increment offer usage if an offer code was used
+    // Prepare merged payment details
+    let existingPaymentDetails = {};
+    if (currentOrder.payment_details_json) {
+      try {
+        existingPaymentDetails =
+          typeof currentOrder.payment_details_json === "string"
+            ? JSON.parse(currentOrder.payment_details_json)
+            : currentOrder.payment_details_json;
+      } catch {}
+    }
+
+    const mergedDetails = {
+      ...existingPaymentDetails,
+      razorpay_order_id: razorpayOrderId || currentOrder.razorpay_order_id,
+      razorpay_payment_id: razorpayPaymentId || currentOrder.razorpay_payment_id,
+      razorpay_signature: razorpaySignature || currentOrder.razorpay_signature,
+      verified_at: new Date().toISOString(),
+      verified_via: source,
+      ...(paymentDetails || {}),
+    };
+
+    // =========================================================================
+    // INVENTORY CONFLICT PATH: CUSTOMER PAID, BUT PRODUCT BECAME OUT OF STOCK
+    // =========================================================================
+    if (outOfStockItems.length > 0) {
+      // Clear user cart so user isn't stuck with sold-out items
+      if (currentOrder.user_id) {
+        await trx("cart_items")
+          .where({ user_id: currentOrder.user_id })
+          .del();
+      }
+
+      const conflictReason = `Item(s) out of stock after payment: ${outOfStockItems
+        .map((i) => `${i.productName} (Req: ${i.requestedQuantity}, Avail: ${i.availableStock})`)
+        .join(", ")}`;
+
+      mergedDetails.inventory_conflict = true;
+      mergedDetails.out_of_stock_items = outOfStockItems;
+      mergedDetails.conflict_detected_at = new Date().toISOString();
+
+      // Update order: KEEP payment_status as 'Paid', set status to 'Cancelled'
+      const [updatedOrder] = await trx("orders")
+        .where({ id: currentOrder.id })
+        .update({
+          payment_status: "Paid", // Confirmed money was received
+          status: "Cancelled", // Cannot fulfill
+          cancel_reason: conflictReason,
+          transaction_id: razorpayPaymentId,
+          razorpay_payment_id: razorpayPaymentId,
+          razorpay_signature: razorpaySignature || currentOrder.razorpay_signature,
+          payment_details_json: JSON.stringify(mergedDetails),
+          updated_at: trx.fn.now(),
+        })
+        .returning("*");
+
+      return {
+        order: updatedOrder,
+        alreadyPaid: false,
+        inventoryConflict: true,
+        outOfStockItems,
+      };
+    }
+
+    // =========================================================================
+    // NORMAL SUFFICIENT STOCK PATH
+    // =========================================================================
+    // 5. Decrease stock for catalog items
+    for (const pu of productUpdates) {
+      await trx("products")
+        .where({ id: pu.productId })
+        .update({
+          stock: pu.newStock,
+          updated_at: trx.fn.now(),
+        });
+    }
+
+    // 6. Increment offer usage if an offer code was used
     let pricing = currentOrder.pricing_details_json;
     if (typeof pricing === "string") {
       try {
@@ -193,14 +380,14 @@ async function finalizePaidOrder({
       }
     }
 
-    // 6. Clear user cart
+    // 7. Clear user cart
     if (currentOrder.user_id) {
       await trx("cart_items")
         .where({ user_id: currentOrder.user_id })
         .del();
     }
 
-    // 7. Update order items production status
+    // 8. Update order items production status
     for (const item of orderItems) {
       const isMadeToOrder = item.availability_type === "MADE_TO_ORDER";
       await trx("order_items")
@@ -213,31 +400,7 @@ async function finalizePaidOrder({
         });
     }
 
-    // 8. Prepare merged payment details
-    let existingPaymentDetails = {};
-    if (currentOrder.payment_details_json) {
-      try {
-        existingPaymentDetails =
-          typeof currentOrder.payment_details_json === "string"
-            ? JSON.parse(currentOrder.payment_details_json)
-            : currentOrder.payment_details_json;
-      } catch {}
-    }
-
-    const mergedDetails = {
-      ...existingPaymentDetails,
-      razorpay_order_id:
-        razorpayOrderId || currentOrder.razorpay_order_id,
-      razorpay_payment_id:
-        razorpayPaymentId || currentOrder.razorpay_payment_id,
-      razorpay_signature:
-        razorpaySignature || currentOrder.razorpay_signature,
-      verified_at: new Date().toISOString(),
-      verified_via: source,
-      ...(paymentDetails || {}),
-    };
-
-    // 9. Update order to Paid
+    // 9. Update order to Paid & Pending
     const [updatedOrder] = await trx("orders")
       .where({ id: currentOrder.id })
       .update({
@@ -255,14 +418,112 @@ async function finalizePaidOrder({
     return {
       order: updatedOrder,
       alreadyPaid: false,
+      inventoryConflict: false,
     };
   });
 
-  // If newly finalized, trigger notifications & socket broadcasts
-  if (!result.alreadyPaid) {
-    await notifyPaymentSuccess(result.order, razorpayPaymentId, source);
+  if (result.alreadyPaid) {
+    return result;
   }
 
+  // =========================================================================
+  // POST-TRANSACTION RESOLUTION FOR INVENTORY CONFLICT
+  // =========================================================================
+  if (result.inventoryConflict) {
+    let autoRefund = null;
+    let autoRefundError = null;
+
+    try {
+      autoRefund = await initiateRazorpayRefund({
+        paymentId: razorpayPaymentId,
+        amount: result.order.total_amount,
+        notes: {
+          order_id: String(result.order.id),
+          order_number: result.order.order_number,
+          reason: "inventory_out_of_stock_conflict",
+        },
+      });
+    } catch (refundErr) {
+      console.warn("[OrderPaymentService] Auto-refund attempt notice:", refundErr.message);
+      autoRefundError = refundErr.message;
+    }
+
+    let finalOrder = result.order;
+
+    if (autoRefund && autoRefund.id) {
+      // Record refund in DB
+      let details = {};
+      try {
+        details =
+          typeof result.order.payment_details_json === "string"
+            ? JSON.parse(result.order.payment_details_json)
+            : (result.order.payment_details_json || {});
+      } catch {}
+
+      const refunds = Array.isArray(details.refunds) ? details.refunds : [];
+      refunds.push({
+        refund_id: autoRefund.id,
+        amount: autoRefund.amount ? autoRefund.amount / 100 : result.order.total_amount,
+        status: autoRefund.status || "processed",
+        created_at: new Date().toISOString(),
+      });
+
+      const [refundedOrder] = await db("orders")
+        .where({ id: result.order.id })
+        .update({
+          payment_status: "Refunded",
+          payment_details_json: JSON.stringify({
+            ...details,
+            auto_refund: autoRefund,
+            refunds,
+          }),
+          updated_at: db.fn.now(),
+        })
+        .returning("*");
+
+      if (refundedOrder) finalOrder = refundedOrder;
+    } else if (autoRefundError) {
+      let details = {};
+      try {
+        details =
+          typeof result.order.payment_details_json === "string"
+            ? JSON.parse(result.order.payment_details_json)
+            : (result.order.payment_details_json || {});
+      } catch {}
+
+      const [flaggedOrder] = await db("orders")
+        .where({ id: result.order.id })
+        .update({
+          payment_details_json: JSON.stringify({
+            ...details,
+            refund_required: true,
+            auto_refund_error: autoRefundError,
+          }),
+          updated_at: db.fn.now(),
+        })
+        .returning("*");
+
+      if (flaggedOrder) finalOrder = flaggedOrder;
+    }
+
+    // Trigger Notifications & Sockets for Inventory Conflict
+    await notifyStockConflict({
+      order: finalOrder,
+      outOfStockItems: result.outOfStockItems,
+      autoRefunded: Boolean(autoRefund && autoRefund.id),
+      autoRefundError,
+    });
+
+    return {
+      ...result,
+      order: finalOrder,
+      autoRefund,
+      autoRefundError,
+    };
+  }
+
+  // Normal flow notifications
+  await notifyPaymentSuccess(result.order, razorpayPaymentId, source);
   return result;
 }
 
@@ -343,13 +604,16 @@ async function handlePaymentFailed({
  * Handle a processed refund event from Razorpay safely.
  */
 async function handleRefundProcessed({
+  orderId,
   razorpayPaymentId,
   razorpayOrderId,
   refundEntity = {},
   notes = {},
 }) {
   let query = db("orders");
-  if (razorpayPaymentId) {
+  if (orderId) {
+    query = query.where({ id: orderId });
+  } else if (razorpayPaymentId) {
     query = query
       .where({ transaction_id: razorpayPaymentId })
       .orWhere({ razorpay_payment_id: razorpayPaymentId });

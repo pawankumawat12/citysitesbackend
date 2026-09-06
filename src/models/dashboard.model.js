@@ -1,5 +1,47 @@
 const db = require("../../config/db");
 
+/**
+ * Generates SQL condition for orders that qualify as realized business revenue:
+ * 1. Online Payment: payment must be 'Paid' (and order not cancelled/refunded/failed).
+ * 2. Cash on Delivery (COD): must follow delivered/completed business rules
+ *    (status in 'Delivered' or 'Completed' or payment_status marked 'Paid', and not cancelled).
+ * 3. Never counts 'Cancelled', 'Pending Payment', 'Payment Failed', 'Refunded', or 'Failed'.
+ */
+function getRevenueOrderRawCondition(tableAlias = "orders") {
+  const prefix = tableAlias ? `${tableAlias}.` : "";
+  return `(
+    LOWER(${prefix}status) NOT IN ('cancelled', 'pending payment', 'payment failed')
+    AND LOWER(COALESCE(${prefix}payment_status, '')) NOT IN ('refunded', 'failed')
+    AND (
+      (${prefix}payment_method = 'Online Payment' AND ${prefix}payment_status = 'Paid')
+      OR
+      (${prefix}payment_method = 'Cash on Delivery' AND (LOWER(${prefix}status) IN ('delivered', 'completed') OR ${prefix}payment_status = 'Paid'))
+    )
+  )`;
+}
+
+/**
+ * Filter a Knex query to strictly revenue-qualifying orders.
+ */
+function applyRevenueOrderFilter(query, tableAlias = "orders") {
+  return query.whereRaw(getRevenueOrderRawCondition(tableAlias));
+}
+
+/**
+ * Generates a conditional SUM expression for revenue calculation
+ * without altering the row filter for counts.
+ */
+function getRevenueSumExpression(tableAlias = "orders", amountCol = "total_amount") {
+  const prefix = tableAlias ? `${tableAlias}.` : "";
+  return `COALESCE(SUM(
+    CASE 
+      WHEN ${getRevenueOrderRawCondition(tableAlias)}
+      THEN ${prefix}${amountCol}
+      ELSE 0
+    END
+  ), 0)`;
+}
+
 const DashboardModel = {
   /**
    * Get all core KPIs with comparisons
@@ -22,33 +64,32 @@ const DashboardModel = {
       totalCustomersRow,
       totalProductsRow,
     ] = await Promise.all([
-      // Total orders
+      // Total orders (all orders placed)
       db("orders").count("id as count").first(),
 
-      // Total revenue (non-cancelled)
-      db("orders")
-        .whereRaw("LOWER(status) != 'cancelled'")
+      // Total revenue (strictly realized revenue: paid online or delivered/paid COD)
+      applyRevenueOrderFilter(db("orders"))
         .sum("total_amount as revenue")
         .first(),
 
-      // Today sales & orders
+      // Today sales (strictly realized revenue) & today orders (all non-cancelled placed today)
       db("orders")
         .where("created_at", ">=", todayStart)
         .whereRaw("LOWER(status) != 'cancelled'")
         .select(
           db.raw("COUNT(id) as today_orders"),
-          db.raw("COALESCE(SUM(total_amount), 0) as today_sales")
+          db.raw(`${getRevenueSumExpression("orders", "total_amount")} as today_sales`)
         )
         .first(),
 
-      // Yesterday sales & orders
+      // Yesterday sales (strictly realized revenue) & yesterday orders
       db("orders")
         .where("created_at", ">=", yesterdayStart)
         .where("created_at", "<", yesterdayEnd)
         .whereRaw("LOWER(status) != 'cancelled'")
         .select(
           db.raw("COUNT(id) as yesterday_orders"),
-          db.raw("COALESCE(SUM(total_amount), 0) as yesterday_sales")
+          db.raw(`${getRevenueSumExpression("orders", "total_amount")} as yesterday_sales`)
         )
         .first(),
 
@@ -119,7 +160,7 @@ const DashboardModel = {
         .select(
           db.raw("EXTRACT(HOUR FROM created_at) as hour"),
           db.raw("COUNT(id) as orders_count"),
-          db.raw("COALESCE(SUM(total_amount), 0) as revenue")
+          db.raw(`${getRevenueSumExpression("orders", "total_amount")} as revenue`)
         )
         .groupByRaw("EXTRACT(HOUR FROM created_at)")
         .orderByRaw("EXTRACT(HOUR FROM created_at) ASC");
@@ -148,7 +189,7 @@ const DashboardModel = {
           db.raw("EXTRACT(YEAR FROM created_at) as year"),
           db.raw("EXTRACT(MONTH FROM created_at) as month"),
           db.raw("COUNT(id) as orders_count"),
-          db.raw("COALESCE(SUM(total_amount), 0) as revenue")
+          db.raw(`${getRevenueSumExpression("orders", "total_amount")} as revenue`)
         )
         .groupByRaw("EXTRACT(YEAR FROM created_at), EXTRACT(MONTH FROM created_at)")
         .orderByRaw("EXTRACT(YEAR FROM created_at) ASC, EXTRACT(MONTH FROM created_at) ASC");
@@ -185,7 +226,7 @@ const DashboardModel = {
           .whereRaw("LOWER(status) != 'cancelled'")
           .select(
             db.raw("COUNT(id) as orders_count"),
-            db.raw("COALESCE(SUM(total_amount), 0) as revenue")
+            db.raw(`${getRevenueSumExpression("orders", "total_amount")} as revenue`)
           )
           .first();
 
@@ -212,7 +253,7 @@ const DashboardModel = {
           .whereRaw("LOWER(status) != 'cancelled'")
           .select(
             db.raw("COUNT(id) as orders_count"),
-            db.raw("COALESCE(SUM(total_amount), 0) as revenue")
+            db.raw(`${getRevenueSumExpression("orders", "total_amount")} as revenue`)
           )
           .first();
 
@@ -262,11 +303,14 @@ const DashboardModel = {
    * Top selling products by volume and revenue
    */
   async getTopSellingProducts(limit = 5) {
-    const rows = await db("order_items")
+    const query = db("order_items")
       .join("orders", "order_items.order_id", "orders.id")
       .leftJoin("products", "order_items.product_id", "products.id")
-      .leftJoin("categories", "products.category_id", "categories.id")
-      .whereRaw("LOWER(orders.status) != 'cancelled'")
+      .leftJoin("categories", "products.category_id", "categories.id");
+
+    applyRevenueOrderFilter(query, "orders");
+
+    const rows = await query
       .select(
         db.raw("COALESCE(products.id, order_items.product_id, 0) as id"),
         db.raw("COALESCE(products.name, order_items.product_name) as name"),
@@ -312,11 +356,14 @@ const DashboardModel = {
    * Category-wise sales distribution
    */
   async getCategorySalesDistribution() {
-    const rows = await db("order_items")
+    const query = db("order_items")
       .join("orders", "order_items.order_id", "orders.id")
       .leftJoin("products", "order_items.product_id", "products.id")
-      .leftJoin("categories", "products.category_id", "categories.id")
-      .whereRaw("LOWER(orders.status) != 'cancelled'")
+      .leftJoin("categories", "products.category_id", "categories.id");
+
+    applyRevenueOrderFilter(query, "orders");
+
+    const rows = await query
       .select(
         db.raw("COALESCE(categories.name, 'Popular Bites') as category_name"),
         db.raw("COALESCE(SUM(order_items.quantity), 0) as items_sold"),

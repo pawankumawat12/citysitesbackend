@@ -486,6 +486,24 @@ async function findAllOrders({ page = 1, limit = 20, status, search }) {
 }
 
 async function updateOrderStatus(orderId, status) {
+  const order = await db("orders").where({ id: orderId }).first();
+  if (!order) {
+    throw new Error("Order not found");
+  }
+
+  // Guard: Cannot advance unpaid online order to in-progress or completed states
+  if (
+    order.payment_method !== "Cash on Delivery" &&
+    order.payment_status !== "Paid" &&
+    ["Preparing", "Out for Delivery", "Delivered", "Completed"].includes(status)
+  ) {
+    const err = new Error(
+      `Cannot change order status to '${status}': Online payment is still pending.`
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
   const updatePayload = {
     status,
     updated_at: db.fn.now(),
@@ -527,7 +545,7 @@ async function cancelOrder(orderId, cancelReason) {
       throw new Error("Completed orders cannot be cancelled");
     }
 
-    // Update order status09
+    // Update order status
     const [updatedOrder] = await trx("orders")
       .where({ id: orderId })
       .update({
@@ -537,13 +555,19 @@ async function cancelOrder(orderId, cancelReason) {
       })
       .returning("*");
 
-    // Fetch order items to restore stock
-    const items = await trx("order_items").where({ order_id: orderId });
-    for (const item of items) {
-      if (item.availability_type !== "MADE_TO_ORDER") {
-        await trx("products")
-          .where({ id: item.product_id })
-          .increment("stock", item.quantity);
+    // Fetch order items to restore stock ONLY if stock was deducted originally.
+    // Stock is only deducted for Cash on Delivery or once payment is marked 'Paid'.
+    const stockWasDeducted =
+      order.payment_method === "Cash on Delivery" || order.payment_status === "Paid";
+
+    if (stockWasDeducted) {
+      const items = await trx("order_items").where({ order_id: orderId });
+      for (const item of items) {
+        if (item.availability_type !== "MADE_TO_ORDER") {
+          await trx("products")
+            .where({ id: item.product_id })
+            .increment("stock", item.quantity);
+        }
       }
     }
 
@@ -568,6 +592,15 @@ async function acceptOrder(orderId, { notes = null } = {}) {
     throw new Error("Order not found");
   }
 
+  // Guard: Unpaid online payment orders cannot be accepted or prepared
+  if (order.payment_method !== "Cash on Delivery" && order.payment_status !== "Paid") {
+    const err = new Error(
+      "Cannot accept order: Online payment is still pending. Customer must complete payment before the order can be accepted."
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
   const updatePayload = {
     status: "Preparing",
     updated_at: db.fn.now(),
@@ -589,12 +622,84 @@ async function rejectOrder(orderId, { cancelReason = "Order rejected by store" }
   return cancelOrder(orderId, cancelReason);
 }
 
+async function bulkUpdateOrderStatus(ids, targetStatus, { cancelReason = "Cancelled in bulk by admin" } = {}) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { updatedCount: 0, skippedCount: 0, skippedUnpaidOnline: [], otherSkipped: [], updatedOrders: [] };
+  }
+
+  const inProgressStatuses = ["Preparing", "Out for Delivery", "Delivered", "Completed"];
+  const isAdvancingToFulfillment = inProgressStatuses.includes(targetStatus);
+
+  const orders = await db("orders").whereIn("id", ids);
+  const updatedOrders = [];
+  const skippedUnpaidOnline = [];
+  const otherSkipped = [];
+
+  for (const order of orders) {
+    // Payment Guardrail: cannot advance unpaid online orders to in-progress or fulfilled states
+    const isUnpaidOnline =
+      order.payment_method === "Online Payment" && order.payment_status !== "Paid";
+
+    if (isAdvancingToFulfillment && isUnpaidOnline) {
+      skippedUnpaidOnline.push({
+        id: order.id,
+        orderNumber: order.order_number,
+        reason: "Online payment is still pending",
+      });
+      continue;
+    }
+
+    try {
+      if (targetStatus === "Cancelled") {
+        if (order.status === "Cancelled" || order.status === "Completed") {
+          otherSkipped.push({
+            id: order.id,
+            orderNumber: order.order_number,
+            reason: `Order is already ${order.status.toLowerCase()}`,
+          });
+          continue;
+        }
+        const cancelled = await cancelOrder(order.id, cancelReason);
+        updatedOrders.push(cancelled);
+      } else {
+        const updatePayload = {
+          status: targetStatus,
+          updated_at: db.fn.now(),
+        };
+        if (targetStatus === "Delivered" || targetStatus === "Completed") {
+          updatePayload.payment_status = "Paid";
+        }
+        const [updated] = await db("orders")
+          .where({ id: order.id })
+          .update(updatePayload)
+          .returning("*");
+        updatedOrders.push(updated);
+      }
+    } catch (err) {
+      otherSkipped.push({
+        id: order.id,
+        orderNumber: order.order_number,
+        reason: err.message,
+      });
+    }
+  }
+
+  return {
+    updatedCount: updatedOrders.length,
+    skippedCount: skippedUnpaidOnline.length + otherSkipped.length,
+    skippedUnpaidOnline,
+    otherSkipped,
+    updatedOrders,
+  };
+}
+
 module.exports = {
   createOrderWithTransaction,
   findOrdersByUser,
   findOrderById,
   findAllOrders,
   updateOrderStatus,
+  bulkUpdateOrderStatus,
   updateItemProductionStatus,
   cancelOrder,
   updateOrderPaymentStatus,

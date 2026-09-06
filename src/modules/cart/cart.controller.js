@@ -1,3 +1,4 @@
+const db = require("../../../config/db");
 const { findProductById } = require("../../models/product.model");
 const {
   getCartItems,
@@ -27,10 +28,8 @@ function parseImages(images) {
   return [];
 }
 
-async function respondWithCart(res, userId, message = "Success", options = {}) {
-  const rawItems = await getCartItems(userId);
-
-  const items = rawItems.map((item) => {
+function formatCartItems(rawItems) {
+  return rawItems.map((item) => {
     const price = Number(item.price) || 0;
     const quantity = Number(item.quantity) || 0;
     const stock = Number(item.stock) || 0;
@@ -59,9 +58,9 @@ async function respondWithCart(res, userId, message = "Success", options = {}) {
     }
 
     return {
-      id: item.product_id,
-      cart_item_id: item.cart_item_id,
-      product_id: item.product_id,
+      id: item.product_id || item.id,
+      cart_item_id: item.cart_item_id || null,
+      product_id: item.product_id || item.id,
       name: item.name,
       description: item.description,
       price,
@@ -84,31 +83,14 @@ async function respondWithCart(res, userId, message = "Success", options = {}) {
       updated_at: item.updated_at,
     };
   });
+}
 
-  // Get delivery address for distance calculations
-  let deliveryAddress = null;
-  if (options.addressId) {
-    deliveryAddress = await getAddressById(options.addressId, userId);
-  }
-  if (!deliveryAddress) {
-    const userAddresses = await getAddressesByUserId(userId);
-    deliveryAddress = userAddresses.find((a) => a.is_default) || userAddresses[0] || null;
-  }
-
-  // Calculate pricing completely on the backend
-  const pricing = await calculateCartAndOrderPricing({
-    items,
-    deliveryAddress,
-    paymentMethod: options.paymentMethod || "Cash on Delivery",
-    offerCode: options.offerCode || null,
-  });
-
-  const enrichedItems = pricing.items || items;
+function buildCartSummary(pricing, enrichedItems) {
   const stockProblemItems = enrichedItems.filter(
     (it) => it.isOutOfStock || it.exceedsStock
   );
 
-  const summary = {
+  return {
     totalItems: pricing.total_items,
     totalProductsDelivered: pricing.total_products_delivered ?? pricing.total_items,
     totalQuantity: pricing.total_items,
@@ -162,6 +144,32 @@ async function respondWithCart(res, userId, message = "Success", options = {}) {
       validForSeconds: pricing.valid_for_seconds,
     },
   };
+}
+
+async function respondWithCart(res, userId, message = "Success", options = {}) {
+  const rawItems = await getCartItems(userId);
+  const items = formatCartItems(rawItems);
+
+  // Get delivery address for distance calculations
+  let deliveryAddress = null;
+  if (options.addressId) {
+    deliveryAddress = await getAddressById(options.addressId, userId);
+  }
+  if (!deliveryAddress) {
+    const userAddresses = await getAddressesByUserId(userId);
+    deliveryAddress = userAddresses.find((a) => a.is_default) || userAddresses[0] || null;
+  }
+
+  // Calculate pricing completely on the backend
+  const pricing = await calculateCartAndOrderPricing({
+    items,
+    deliveryAddress,
+    paymentMethod: options.paymentMethod || "Cash on Delivery",
+    offerCode: options.offerCode || null,
+  });
+
+  const enrichedItems = pricing.items || items;
+  const summary = buildCartSummary(pricing, enrichedItems);
 
   return res.status(200).json({
     success: true,
@@ -171,6 +179,7 @@ async function respondWithCart(res, userId, message = "Success", options = {}) {
       summary,
       pricing,
       deliveryAddress,
+      ...(options.mergeReport ? { mergeReport: options.mergeReport } : {}),
     },
   });
 }
@@ -329,10 +338,188 @@ async function deleteCartItem(req, res) {
 async function deleteCart(req, res) {
   try {
     await clearCart(req.user.id);
-    return await respondWithCart(res, req.user.id, "Cart cleared successfully");
+    return await respondWithCart(res, req.user.id, "Cart cleared");
   } catch (error) {
     console.error("Clear cart error:", error);
     return res.status(500).json({ success: false, message: "Server error" });
+  }
+}
+
+async function getGuestCartPreview(req, res) {
+  try {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const offerCode = req.body?.offerCode || null;
+
+    if (rawItems.length === 0) {
+      const emptyPricing = await calculateCartAndOrderPricing({
+        items: [],
+        paymentMethod: "Cash on Delivery",
+        offerCode,
+      });
+      return res.status(200).json({
+        success: true,
+        message: "Guest cart is empty",
+        data: {
+          items: [],
+          summary: buildCartSummary(emptyPricing, []),
+          pricing: emptyPricing,
+          deliveryAddress: null,
+        },
+      });
+    }
+
+    const productIds = rawItems
+      .map((it) => parsePositiveInteger(it.productId || it.id))
+      .filter(Boolean);
+
+    const products = await db("products")
+      .select([
+        "products.id as product_id",
+        "products.name",
+        "products.description",
+        "products.price",
+        "products.stock",
+        "products.availability_type",
+        "products.images",
+        "products.is_active",
+        "products.category_id",
+        "categories.name as category_name",
+      ])
+      .leftJoin("categories", "products.category_id", "categories.id")
+      .whereIn("products.id", productIds);
+
+    const productMap = new Map(products.map((p) => [Number(p.product_id), p]));
+
+    const populatedItems = [];
+    for (const raw of rawItems) {
+      const pId = parsePositiveInteger(raw.productId || raw.id);
+      const qty = parsePositiveInteger(raw.quantity || raw.qty || 1) || 1;
+      const product = productMap.get(pId);
+      if (!product) continue;
+
+      populatedItems.push({
+        ...product,
+        quantity: qty,
+      });
+    }
+
+    const formattedItems = formatCartItems(populatedItems);
+    const pricing = await calculateCartAndOrderPricing({
+      items: formattedItems,
+      deliveryAddress: null,
+      paymentMethod: "Cash on Delivery",
+      offerCode,
+    });
+
+    const enrichedItems = pricing.items || formattedItems;
+    const summary = buildCartSummary(pricing, enrichedItems);
+
+    return res.status(200).json({
+      success: true,
+      message: "Guest cart preview generated",
+      data: {
+        items: enrichedItems,
+        summary,
+        pricing,
+        deliveryAddress: null,
+      },
+    });
+  } catch (error) {
+    console.error("Guest cart preview error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+}
+
+async function mergeGuestCart(req, res) {
+  try {
+    const userId = req.user.id;
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+
+    if (rawItems.length === 0) {
+      return await respondWithCart(res, userId, "Cart is up to date");
+    }
+
+    const mergeReport = {
+      mergedCount: 0,
+      adjustedItems: [],
+      outOfStockItems: [],
+      skippedInactiveItems: [],
+    };
+
+    // Run merge inside a transaction
+    await db.transaction(async (trx) => {
+      // Get current user cart in DB
+      const currentCart = await trx("cart_items").where({ user_id: userId });
+      const currentMap = new Map(
+        currentCart.map((c) => [Number(c.product_id), Number(c.quantity)])
+      );
+
+      for (const item of rawItems) {
+        const productId = parsePositiveInteger(item.productId || item.id);
+        const guestQty = parsePositiveInteger(item.quantity || item.qty || 1);
+
+        if (!productId || !guestQty) continue;
+
+        // Fetch product
+        const product = await trx("products").where({ id: productId }).first();
+        if (!product || !product.is_active) {
+          mergeReport.skippedInactiveItems.push({
+            productId,
+            name: product?.name || `Product #${productId}`,
+          });
+          continue;
+        }
+
+        const isMadeToOrder = product.availability_type === "MADE_TO_ORDER";
+        const productStock = Number(product.stock) || 0;
+        const existingQty = currentMap.get(productId) || 0;
+        const desiredTotal = existingQty + guestQty;
+
+        if (isMadeToOrder) {
+          await upsertCartItem(userId, productId, desiredTotal, trx);
+          currentMap.set(productId, desiredTotal);
+          mergeReport.mergedCount++;
+        } else {
+          // Check stock
+          if (productStock <= 0) {
+            mergeReport.outOfStockItems.push({
+              productId,
+              name: product.name,
+              availableStock: 0,
+            });
+            continue;
+          }
+
+          let finalQty = desiredTotal;
+          if (desiredTotal > productStock) {
+            finalQty = productStock;
+            mergeReport.adjustedItems.push({
+              productId,
+              name: product.name,
+              requestedTotal: desiredTotal,
+              availableStock: productStock,
+              cappedQuantity: finalQty,
+            });
+          }
+
+          await upsertCartItem(userId, productId, finalQty, trx);
+          currentMap.set(productId, finalQty);
+          mergeReport.mergedCount++;
+        }
+      }
+    });
+
+    let message = "Cart merged successfully";
+    if (mergeReport.adjustedItems.length > 0 || mergeReport.outOfStockItems.length > 0) {
+      message = "Cart merged with stock adjustments";
+    }
+
+    return await respondWithCart(res, userId, message, {
+      mergeReport,
+    });
+  } catch (error) {
+    console.error("Merge cart error:", error);
+    return res.status(500).json({ success: false, message: "Failed to merge cart" });
   }
 }
 
@@ -342,4 +529,6 @@ module.exports = {
   updateCartItem,
   deleteCartItem,
   deleteCart,
+  getGuestCartPreview,
+  mergeGuestCart,
 };

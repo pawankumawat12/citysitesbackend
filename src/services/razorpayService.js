@@ -66,8 +66,34 @@ const verifyWebhookSignature = (rawBody, signature, secret) => {
   }
 };
 
+/**
+ * Initiate a refund on Razorpay
+ *
+ * @param {Object} params
+ * @param {string} params.paymentId - Razorpay payment ID (e.g. pay_xxxx)
+ * @param {number|string} [params.amount] - Amount in Rupees (converted to paise for Razorpay)
+ * @param {Object} [params.notes] - Metadata notes
+ * @returns {Promise<Object>}
+ */
+const initiateRazorpayRefund = async ({ paymentId, amount, notes = {} }) => {
+  if (!paymentId) {
+    throw new Error("Payment ID is required to initiate refund");
+  }
+
+  const options = {
+    notes,
+  };
+
+  if (amount && Number(amount) > 0) {
+    options.amount = Math.round(Number(amount) * 100);
+  }
+
+  return await razorpay.payments.refund(paymentId, options);
+};
+
 module.exports = {
   razorpay,
   createRazorpayOrder,
   verifyWebhookSignature,
+  initiateRazorpayRefund,
 };

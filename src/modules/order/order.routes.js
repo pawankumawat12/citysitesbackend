@@ -9,9 +9,14 @@ const {
   markItemProduced,
   cancelUserOrder,
   updatePaymentStatusController,
+  refundOrderController,
   acceptOrderController,
   rejectOrderController,
   verifyRazorpayPayment,
+  retryPaymentController,
+  bulkUpdateOrderStatusHandler,
+  exportOrdersHandler,
+  downloadInvoiceHandler,
 } = require("./order.controller");
 const { handleRazorpayWebhook } = require("../webhook/webhook.controller");
 
@@ -20,10 +25,14 @@ const router = express.Router();
 // Public webhook endpoint for Razorpay payment notifications
 router.post("/webhook/razorpay", handleRazorpayWebhook);
 
-// Authenticated customer routes
+// Authenticated customer & admin routes
 router.use(verifyToken);
+router.get("/export", isAdmin, exportOrdersHandler);
+router.post("/bulk-status", isAdmin, bulkUpdateOrderStatusHandler);
 router.post("/", createOrder);
 router.post("/verify-payment", verifyRazorpayPayment);
+router.post("/:id/retry-payment", retryPaymentController);
+router.get("/:id/invoice", downloadInvoiceHandler);
 router.get("/", getUserOrders);
 router.get("/:id", getOrderDetails);
 router.post("/:id/cancel", cancelUserOrder);
@@ -34,6 +43,7 @@ router.patch("/:id/status", isAdmin, updateStatus);
 router.post("/:id/accept", isAdmin, acceptOrderController);
 router.post("/:id/reject", isAdmin, rejectOrderController);
 router.patch("/:id/payment-status", isAdmin, updatePaymentStatusController);
+router.post("/:id/refund", isAdmin, refundOrderController);
 router.patch("/items/:itemId/produced", isAdmin, markItemProduced);
 
 module.exports = router;

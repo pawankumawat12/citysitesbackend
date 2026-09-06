@@ -33,6 +33,28 @@ async function createProductReview(req, res) {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
 
+    // Prevent duplicate reviews from the same user for the same product
+    const existingReview = await db("reviews")
+      .where({ user_id: userId, product_id: productId, type: "product" })
+      .first();
+
+    if (existingReview) {
+      return res.status(400).json({
+        success: false,
+        message: "You have already reviewed this product. You can edit your existing review anytime.",
+      });
+    }
+
+    // Check if user has an actual delivered order containing this product
+    const deliveredOrder = await db("orders")
+      .join("order_items", "orders.id", "order_items.order_id")
+      .where("orders.user_id", userId)
+      .where("order_items.product_id", productId)
+      .whereIn("orders.status", ["delivered", "completed", "Delivered", "Completed"])
+      .first();
+
+    const isVerifiedPurchase = Boolean(deliveredOrder);
+
     const review = await reviewModel.createReview({
       user_id: userId,
       product_id: productId,
@@ -40,6 +62,7 @@ async function createProductReview(req, res) {
       rating: numRating,
       title: title || null,
       comment: comment.trim(),
+      is_verified_purchase: isVerifiedPurchase,
     });
 
     // Notify admins in real-time

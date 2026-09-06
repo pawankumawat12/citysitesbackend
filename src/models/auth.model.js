@@ -2,6 +2,7 @@ const db = require("../../config/db");
 const {
   renderEmailTemplate,
   sendTemplatedMail,
+  sendTemplatedMailBackground,
 } = require("../services/emailTemplate.service");
 
 function findUserByEmail(email) {
@@ -115,14 +116,14 @@ const sendOtp = async ({
   }
 
   try {
-    return await sendTemplatedMail({
+    return await sendTemplatedMailBackground({
       to: email,
       templateSlug,
       variables,
       emailType,
     });
   } catch (error) {
-    console.error("Templated OTP email error:", error);
+    console.error("Templated OTP email queue error:", error);
     throw error;
   }
 };
@@ -140,14 +141,14 @@ const sendEmailChangeOtp = async ({ email, otp, userName = "there" }) => {
   }
 
   try {
-    return await sendTemplatedMail({
+    return await sendTemplatedMailBackground({
       to: email,
       templateSlug,
       variables,
       emailType,
     });
   } catch (error) {
-    console.error("Templated email change OTP error:", error);
+    console.error("Templated email change OTP queue error:", error);
     throw error;
   }
 };
@@ -165,14 +166,14 @@ const sendPasswordResetEmail = async ({ email, resetUrl, userName = "there" }) =
   }
 
   try {
-    return await sendTemplatedMail({
+    return await sendTemplatedMailBackground({
       to: email,
       templateSlug,
       variables,
       emailType,
     });
   } catch (error) {
-    console.error("Templated password reset email error:", error);
+    console.error("Templated password reset email queue error:", error);
     throw error;
   }
 };
@@ -239,7 +240,21 @@ async function listCustomers({
       "users.blocked_at",
       "users.created_at",
       db.raw("COUNT(orders.id) as orders_count"),
-      db.raw("COALESCE(SUM(orders.total_amount), 0) as total_spent")
+      db.raw(`COALESCE(SUM(
+        CASE 
+          WHEN (
+            LOWER(orders.status) NOT IN ('cancelled', 'pending payment', 'payment failed')
+            AND LOWER(COALESCE(orders.payment_status, '')) NOT IN ('refunded', 'failed')
+            AND (
+              (orders.payment_method = 'Online Payment' AND orders.payment_status = 'Paid')
+              OR
+              (orders.payment_method = 'Cash on Delivery' AND (LOWER(orders.status) IN ('delivered', 'completed') OR orders.payment_status = 'Paid'))
+            )
+          )
+          THEN orders.total_amount
+          ELSE 0
+        END
+      ), 0) as total_spent`)
     )
     .groupBy("users.id")
     .orderBy("users.created_at", "desc")
@@ -311,6 +326,40 @@ function updateBlockedCustomerRequest(id, data) {
     .then((rows) => rows[0]);
 }
 
+function bulkUpdateCustomerStatus(ids, { isBlocked, blockReason }) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve([]);
+  const updateData = {
+    is_blocked: Boolean(isBlocked),
+    block_reason: isBlocked ? (blockReason || "Blocked by admin") : null,
+    blocked_at: isBlocked ? new Date() : null,
+    updated_at: new Date(),
+  };
+
+  return db("users")
+    .whereIn("id", ids)
+    .whereNotIn("role", ["admin", "superadmin"])
+    .update(updateData)
+    .returning([
+      "id",
+      "name",
+      "email",
+      "phone",
+      "role",
+      "is_active",
+      "is_blocked",
+      "block_reason",
+      "blocked_at",
+    ]);
+}
+
+function bulkDeleteCustomers(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve(0);
+  return db("users")
+    .whereIn("id", ids)
+    .whereNotIn("role", ["admin", "superadmin"])
+    .del();
+}
+
 module.exports = {
   findUserByEmail,
   countAdmins,
@@ -323,6 +372,8 @@ module.exports = {
   deleteUser,
   findUserById,
   listCustomers,
+  bulkUpdateCustomerStatus,
+  bulkDeleteCustomers,
   createBlockedCustomerRequest,
   listBlockedCustomerRequests,
   findBlockedRequestById,

@@ -34,6 +34,14 @@ async function startServer() {
   const httpServer = http.createServer(app);
   initSocket(httpServer);
 
+  // Start asynchronous background email queue processor
+  try {
+    const { startEmailQueueWorker } = require("./src/services/emailQueue.service");
+    startEmailQueueWorker();
+  } catch (queueErr) {
+    console.warn("[Server] Failed to start email queue worker:", queueErr.message);
+  }
+
   httpServer.listen(PORT, () => {
     console.log(`Server and Socket.IO running on port ${PORT}`);
   });

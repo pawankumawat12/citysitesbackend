@@ -1,92 +1,191 @@
 const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
+const db = require("../../config/db");
+const { ACCESS_SECRET } = require("../../config/helper");
 
 let io = null;
 
 /**
- * Initialize Socket.IO server with HTTP server
+ * Safely extract JWT token from Socket.IO handshake
+ */
+function extractToken(socket) {
+  // 1. Check socket.handshake.auth
+  if (socket.handshake.auth?.token) return socket.handshake.auth.token;
+  if (socket.handshake.auth?.accessToken) return socket.handshake.auth.accessToken;
+
+  // 2. Check Authorization header
+  const authHeader = socket.handshake.headers?.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.split(" ")[1];
+  }
+
+  // 3. Check cookies
+  const cookieHeader = socket.handshake.headers?.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.match(/(?:^|;\s*)accessToken=([^;]+)/);
+    if (match) return decodeURIComponent(match[1]);
+  }
+
+  // 4. Check query parameter (fallback)
+  if (socket.handshake.query?.token) return socket.handshake.query.token;
+
+  return null;
+}
+
+/**
+ * Initialize Socket.IO server with HTTP server & strict JWT handshake authentication
  */
 function initSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
-      origin: "*", // Allow all origins for dev and prod
+      origin: "*", // Allow dev & prod origins
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
       credentials: true,
     },
     transports: ["websocket", "polling"],
   });
 
+  // =========================================================================
+  // HANDSHAKE JWT AUTHENTICATION MIDDLEWARE
+  // Rejects all unauthenticated or invalid connections at the handshake level
+  // =========================================================================
+  io.use(async (socket, next) => {
+    try {
+      const token = extractToken(socket);
+      if (!token) {
+        return next(new Error("Authentication error: Token required"));
+      }
+
+      let decoded;
+      try {
+        decoded = jwt.verify(token, ACCESS_SECRET);
+      } catch (jwtErr) {
+        return next(new Error("Authentication error: Invalid or expired token"));
+      }
+
+      if (!decoded || !decoded.id) {
+        return next(new Error("Authentication error: Invalid token payload"));
+      }
+
+      const user = await db("users")
+        .where({ id: decoded.id })
+        .select("id", "role", "email", "name", "is_blocked", "is_active")
+        .first();
+
+      if (!user) {
+        return next(new Error("Authentication error: User not found"));
+      }
+
+      if (user.role !== "admin" && (user.is_blocked || user.is_active === false)) {
+        return next(new Error("Authentication error: Account is deactivated"));
+      }
+
+      // Attach verified server-side identity to socket
+      socket.user = {
+        id: Number(user.id),
+        role: user.role,
+        email: user.email,
+        name: user.name || user.email,
+      };
+
+      next();
+    } catch (err) {
+      console.error("[Socket.IO] Handshake auth error:", err.message);
+      return next(new Error("Authentication error: " + (err.message || "Failed to authenticate")));
+    }
+  });
+
+  // =========================================================================
+  // CONNECTION & AUTHORIZED ROOM MANAGEMENT
+  // =========================================================================
   io.on("connection", (socket) => {
-    const { userId, role, orderId } = socket.handshake.query || {};
+    const user = socket.user;
+    if (!user) {
+      socket.disconnect(true);
+      return;
+    }
 
     console.log(
-      `[Socket.IO] New connection: ${socket.id} (User: ${userId || "anon"}, Role: ${role || "guest"})`
+      `[Socket.IO] Authenticated connection: ${socket.id} (User ID: ${user.id}, Role: ${user.role})`
     );
 
-    // Join Admin room if admin
-    if (role === "admin" || socket.handshake.auth?.role === "admin") {
+    // 1. Join user's private room (ONLY for their verified ID)
+    socket.join(`user_${user.id}`);
+
+    // 2. Join Admin room ONLY if authenticated role is admin
+    if (user.role === "admin") {
       socket.join("admin");
-      console.log(`[Socket.IO] Socket ${socket.id} joined 'admin' room`);
+      console.log(`[Socket.IO] Admin socket ${socket.id} joined 'admin' room`);
     }
 
-    // Join User private room if authenticated
-    const effectiveUserId = userId || socket.handshake.auth?.userId;
-    if (effectiveUserId) {
-      socket.join(`user_${effectiveUserId}`);
-      console.log(
-        `[Socket.IO] Socket ${socket.id} joined 'user_${effectiveUserId}' room`
-      );
-    }
+    // 3. Client requests to join an order chat room (enforces DB ownership check)
+    socket.on("join_order_room", async ({ orderId: targetOrderId }) => {
+      try {
+        if (!targetOrderId) return;
+        const oId = Number(targetOrderId);
+        if (!oId) return;
 
-    // Join specific order room if requested in query
-    if (orderId) {
-      socket.join(`order_${orderId}`);
-      console.log(`[Socket.IO] Socket ${socket.id} joined 'order_${orderId}' room`);
-    }
+        // Admins can join any order chat room
+        if (user.role === "admin") {
+          socket.join(`order_${oId}`);
+          console.log(`[Socket.IO] Admin joined 'order_${oId}' room`);
+          return;
+        }
 
-    // Client dynamically joins an order chat room
-    socket.on("join_order_room", ({ orderId: targetOrderId }) => {
-      if (targetOrderId) {
-        socket.join(`order_${targetOrderId}`);
-        console.log(
-          `[Socket.IO] Socket ${socket.id} joined 'order_${targetOrderId}' room`
-        );
+        // Customers can ONLY join their own order room
+        const order = await db("orders")
+          .where({ id: oId })
+          .select("id", "user_id")
+          .first();
+
+        if (order && Number(order.user_id) === Number(user.id)) {
+          socket.join(`order_${oId}`);
+          console.log(`[Socket.IO] Customer ${user.id} joined 'order_${oId}' room`);
+        } else {
+          console.warn(
+            `[Socket.IO] Security Warning: Unauthorized attempt by user ${user.id} to join 'order_${oId}' room`
+          );
+          socket.emit("error", {
+            message: "Unauthorized: You can only join chats for your own orders",
+          });
+        }
+      } catch (err) {
+        console.error("[Socket.IO] join_order_room error:", err);
       }
     });
 
-    // Client leaves an order chat room
+    // 4. Client leaves an order chat room
     socket.on("leave_order_room", ({ orderId: targetOrderId }) => {
       if (targetOrderId) {
         socket.leave(`order_${targetOrderId}`);
-        console.log(
-          `[Socket.IO] Socket ${socket.id} left 'order_${targetOrderId}' room`
-        );
       }
     });
 
-    // Typing indicators
-    socket.on("typing_start", ({ orderId: targetOrderId, senderRole, senderName }) => {
-      if (targetOrderId) {
+    // 5. Typing indicators (role & sender identity enforced from server-verified socket.user)
+    socket.on("typing_start", ({ orderId: targetOrderId }) => {
+      if (targetOrderId && socket.rooms.has(`order_${targetOrderId}`)) {
         socket.to(`order_${targetOrderId}`).emit("user_typing", {
           orderId: targetOrderId,
-          senderRole,
-          senderName,
+          senderRole: user.role === "admin" ? "admin" : "customer",
+          senderName: user.name,
           isTyping: true,
         });
       }
     });
 
-    socket.on("typing_stop", ({ orderId: targetOrderId, senderRole }) => {
-      if (targetOrderId) {
+    socket.on("typing_stop", ({ orderId: targetOrderId }) => {
+      if (targetOrderId && socket.rooms.has(`order_${targetOrderId}`)) {
         socket.to(`order_${targetOrderId}`).emit("user_typing", {
           orderId: targetOrderId,
-          senderRole,
+          senderRole: user.role === "admin" ? "admin" : "customer",
+          senderName: user.name,
           isTyping: false,
         });
       }
     });
 
     socket.on("disconnect", (reason) => {
-      console.log(`[Socket.IO] Disconnected ${socket.id}: ${reason}`);
+      console.log(`[Socket.IO] Disconnected ${socket.id} (User: ${user.id}): ${reason}`);
     });
   });
 
@@ -156,7 +255,7 @@ function isAdminInOrderRoom(orderId) {
 
 /**
  * Check if a specific customer is currently present in a given order chat room.
- * Customer sockets carry their userId in the handshake query.
+ * Customer identity is verified via socket.user.id.
  * @param {string|number} userId
  * @param {string|number} orderId
  * @returns {boolean}
@@ -168,9 +267,9 @@ function isCustomerInOrderRoom(userId, orderId) {
   for (const socketId of orderRoom) {
     const sock = io.sockets.sockets.get(socketId);
     if (!sock) continue;
-    const uid =
-      sock.handshake?.query?.userId || sock.handshake?.auth?.userId;
-    if (uid && String(uid) === String(userId)) return true;
+    if (sock.user && Number(sock.user.id) === Number(userId)) {
+      return true;
+    }
   }
   return false;
 }
@@ -185,4 +284,3 @@ module.exports = {
   isAdminInOrderRoom,
   isCustomerInOrderRoom,
 };
-

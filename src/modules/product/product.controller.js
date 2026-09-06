@@ -10,6 +10,8 @@ const {
   createProduct,
   updateProduct,
   deleteProduct,
+  bulkUpdateProductStatus,
+  bulkDeleteProducts,
 } = require("../../models/product.model");
 const {
   listActiveOffersCustomer,
@@ -313,10 +315,114 @@ async function deleteProductHandler(req, res) {
   }
 }
 
+async function bulkUpdateProductStatusHandler(req, res) {
+  try {
+    const { ids, isActive } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids must be a non-empty array of product IDs" });
+    }
+    if (typeof isActive !== "boolean") {
+      return res.status(400).json({ message: "isActive boolean is required" });
+    }
+
+    const updatedProducts = await bulkUpdateProductStatus(ids, isActive);
+    return res.status(200).json({
+      message: `Successfully updated ${updatedProducts.length} product(s)`,
+      count: updatedProducts.length,
+      data: updatedProducts,
+    });
+  } catch (error) {
+    console.error("Bulk update product status error:", error);
+    return res.status(500).json({ message: "Server error updating products" });
+  }
+}
+
+async function bulkDeleteProductsHandler(req, res) {
+  try {
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: "ids must be a non-empty array of product IDs" });
+    }
+
+    const deletedCount = await bulkDeleteProducts(ids);
+    return res.status(200).json({
+      message: `Successfully deleted ${deletedCount} product(s)`,
+      count: deletedCount,
+    });
+  } catch (error) {
+    console.error("Bulk delete products error:", error);
+    return res.status(500).json({ message: "Server error deleting products" });
+  }
+}
+
+async function exportProductsHandler(req, res) {
+  try {
+    const { valid, errors, filters } = validateProductListQuery(req.query);
+    if (!valid) {
+      return res.status(400).json({ message: "Validation failed", errors });
+    }
+
+    // Retrieve all matching products without page limits
+    const products = await findProducts({
+      limit: 10000,
+      offset: 0,
+      ...filters,
+    });
+
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return "";
+      let str = typeof val === "object" ? JSON.stringify(val) : String(val);
+      if (str.includes('"') || str.includes(",") || str.includes("\n") || str.includes("\r")) {
+        str = `"${str.replace(/"/g, '""')}"`;
+      }
+      return str;
+    };
+
+    const headers = [
+      "ID",
+      "Name",
+      "Category",
+      "Price",
+      "Stock",
+      "Fulfillment",
+      "Status",
+      "Created At",
+    ];
+
+    const rows = products.map((p) => [
+      p.id,
+      p.name,
+      p.category_name || "",
+      p.price,
+      p.stock,
+      p.availability_type || "IN_STOCK",
+      p.is_active ? "Active" : "Out of stock",
+      p.created_at ? new Date(p.created_at).toISOString() : "",
+    ]);
+
+    const csvContent =
+      headers.map(escapeCsv).join(",") +
+      "\r\n" +
+      rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="products-export-${dateStr}.csv"`);
+    // Prepend UTF-8 BOM
+    return res.status(200).send("\uFEFF" + csvContent);
+  } catch (error) {
+    console.error("Export products error:", error);
+    return res.status(500).json({ message: "Server error exporting products" });
+  }
+}
+
 module.exports = {
   listProducts,
   getProductById,
   createProductHandler,
   updateProductHandler,
   deleteProductHandler,
+  bulkUpdateProductStatusHandler,
+  bulkDeleteProductsHandler,
+  exportProductsHandler,
 };
