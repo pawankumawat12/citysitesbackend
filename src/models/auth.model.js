@@ -9,6 +9,10 @@ function findUserByEmail(email) {
   return db("users").where({ email }).first();
 }
 
+function findUserByGoogleId(googleId) {
+  return db("users").where({ google_id: googleId }).first();
+}
+
 function findUserByPhone(phone) {
   return db("users").where({ phone }).first();
 }
@@ -38,6 +42,8 @@ function createUser(data) {
       "is_active",
       "is_blocked",
       "block_reason",
+      "google_id",
+      "is_email_verified",
     ])
     .then((rows) => rows[0]);
 }
@@ -56,6 +62,8 @@ function updateUser(id, data) {
       "is_active",
       "is_blocked",
       "block_reason",
+      "google_id",
+      "is_email_verified",
     ]);
 }
 
@@ -362,6 +370,7 @@ function bulkDeleteCustomers(ids) {
 
 module.exports = {
   findUserByEmail,
+  findUserByGoogleId,
   countAdmins,
   createUser,
   findUserByPhone,

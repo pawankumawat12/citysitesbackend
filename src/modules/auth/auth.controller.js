@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
+const { OAuth2Client } = require("google-auth-library");
 const db = require("../../../config/db");
 const {
   validateRegister,
@@ -12,6 +13,7 @@ const {
 } = require("./auth.validation");
 const {
   findUserByEmail,
+  findUserByGoogleId,
   findUserByPhone,
   findUserById,
   countAdmins,
@@ -44,6 +46,13 @@ const OTP_RESEND_COOLDOWN_MS = 30 * 1000;
 const OTP_RESEND_LIMIT = 4;
 const OTP_RESEND_LOCK_MS = 10 * 60 * 1000;
 const PASSWORD_RESET_EXPIRY_MS = 15 * 60 * 1000;
+
+// Determines whether OTP verification during LOGIN is enabled for Customer & Admin
+const isEmailVerifyEnabled = () => {
+  const val = process.env.IS_EMAIL_VERIFY;
+  if (val === undefined || val === null || val === "") return true;
+  return String(val).trim().toLowerCase() === "true";
+};
 
 const hashResetToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
@@ -747,34 +756,40 @@ async function login(req, res) {
       });
     }
 
-    // If user's email is NOT verified, generate fresh OTP and return 403
+    // If user's email is NOT verified, check if OTP login verification is enabled
     if (!user.is_email_verified) {
-      try {
-        const otpResult = await issueVerificationOtp(
-          user,
-          user.email,
-          updateUser,
-          { templateSlug: "registration-verification" }
-        );
-        return res.status(403).json({
-          success: false,
-          requiresVerification: true,
-          email: user.email,
-          message:
-            "Your email is not verified yet. A fresh 4-digit verification code has been sent to your email.",
-          data: {
+      if (isEmailVerifyEnabled()) {
+        try {
+          const otpResult = await issueVerificationOtp(
+            user,
+            user.email,
+            updateUser,
+            { templateSlug: "registration-verification" }
+          );
+          return res.status(403).json({
+            success: false,
+            requiresVerification: true,
             email: user.email,
-            messageId: otpResult?.messageId || (otpResult?.jobId ? `queue-${otpResult.jobId}` : "queued"),
-          },
-        });
-      } catch (otpErr) {
-        return res.status(403).json({
-          success: false,
-          requiresVerification: true,
-          email: user.email,
-          message:
-            "Your email is not verified. Please verify your email using the OTP sent to your inbox.",
-        });
+            message:
+              "Your email is not verified yet. A fresh 6-digit verification code has been sent to your email.",
+            data: {
+              email: user.email,
+              messageId: otpResult?.messageId || (otpResult?.jobId ? `queue-${otpResult.jobId}` : "queued"),
+            },
+          });
+        } catch (otpErr) {
+          return res.status(403).json({
+            success: false,
+            requiresVerification: true,
+            email: user.email,
+            message:
+              "Your email is not verified. Please verify your email using the OTP sent to your inbox.",
+          });
+        }
+      } else {
+        // When IS_EMAIL_VERIFY=false: bypass login OTP verification and mark verified
+        await updateUser(user.id, { is_email_verified: true });
+        user.is_email_verified = true;
       }
     }
 
@@ -838,16 +853,208 @@ async function adminLogin(req, res) {
       !(await bcrypt.compare(password, admin.password))
     )
       return res.status(404).json({ message: "Invalid admin credentials" });
+
+    if (admin.is_blocked || admin.is_active === false) {
+      return res.status(403).json({
+        success: false,
+        message: admin.block_reason || "Admin account is inactive or blocked.",
+      });
+    }
+
+    if (!isEmailVerifyEnabled()) {
+      // Direct Admin Login (Email + Password only, no OTP)
+      const accessToken = generateAccessToken(admin);
+      const refreshToken = generateRefreshToken(admin);
+
+      res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
+
+      try {
+        await updateUser(admin.id, { access_token: accessToken });
+      } catch (dbErr) {
+        console.error("Failed to save admin access token:", dbErr.message);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Admin login successful. Welcome back!",
+        accessToken,
+        token: accessToken,
+        requiresOtp: false,
+        user: {
+          id: admin.id,
+          name: admin.name,
+          email: admin.email,
+          role: admin.role,
+          image: admin.image,
+          is_active: admin.is_active !== false,
+        },
+      });
+    }
+
     const result = await issueVerificationOtp(admin, email, updateUser, {
       templateSlug: "login-verification-otp",
     });
     return res.status(200).json({
+      success: true,
       message: "Credentials verified. OTP sent.",
+      requiresOtp: true,
       data: { messageId: result?.messageId || (result?.jobId ? `queue-${result.jobId}` : "queued") },
     });
   } catch (error) {
     console.error("Admin login error:", error);
     return res.status(500).json({ message: "Unable to start admin login" });
+  }
+}
+
+async function googleAuth(req, res) {
+  try {
+    const token =
+      req.body?.idToken ||
+      req.body?.credential ||
+      req.body?.token ||
+      req.headers?.["x-google-token"];
+
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Google ID token is required.",
+      });
+    }
+
+    const googleClientId = process.env.GOOGLE_CLIENT_ID;
+    if (!googleClientId) {
+      console.error("GOOGLE_CLIENT_ID environment variable is missing.");
+      return res.status(500).json({
+        success: false,
+        message: "Google authentication is not properly configured on server.",
+      });
+    }
+
+    const client = new OAuth2Client(googleClientId);
+    let payload;
+
+    try {
+      const ticket = await client.verifyIdToken({
+        idToken: token,
+        audience: googleClientId,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      console.error("Google ID token verification failed:", verifyErr.message);
+      return res.status(401).json({
+        success: false,
+        message: "Google verification failed or token is expired. Please try again.",
+      });
+    }
+
+    if (!payload || !payload.email) {
+      return res.status(400).json({
+        success: false,
+        message: "Google account does not provide an email address.",
+      });
+    }
+
+    if (!payload.email_verified) {
+      return res.status(400).json({
+        success: false,
+        message: "Your Google email address is unverified.",
+      });
+    }
+
+    const googleId = payload.sub;
+    const normalizedEmail = payload.email.trim().toLowerCase();
+
+    // 1. Search by google_id or normalized email
+    let user = null;
+    if (googleId) {
+      user = await findUserByGoogleId(googleId);
+    }
+    if (!user) {
+      user = await findUserByEmail(normalizedEmail);
+    }
+
+    // 2. Existing user handling
+    if (user) {
+      if (user.is_blocked || user.is_active === false) {
+        return res.status(403).json({
+          success: false,
+          isBlocked: Boolean(user.is_blocked),
+          message:
+            user.block_reason ||
+            "Your account has been temporarily blocked or deactivated. Please contact support.",
+        });
+      }
+
+      const updates = {};
+      if (!user.google_id && googleId) {
+        updates.google_id = googleId;
+      }
+      if (!user.is_email_verified) {
+        updates.is_email_verified = true;
+      }
+      if (!user.image && payload.picture) {
+        updates.image = payload.picture;
+      }
+      if (!user.name && payload.name) {
+        updates.name = payload.name.trim();
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await updateUser(user.id, updates);
+        user = { ...user, ...updates };
+      }
+    } else {
+      // 3. New user registration via Google
+      const newUserData = {
+        name: (payload.name || payload.given_name || "Google User").trim(),
+        email: normalizedEmail,
+        google_id: googleId || null,
+        role: "user",
+        is_email_verified: true,
+        is_active: true,
+        image: payload.picture || null,
+        password: null,
+      };
+
+      user = await createUser(newUserData);
+    }
+
+    // 4. Issue tokens and session cookies
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
+
+    // Set secure HttpOnly refreshToken cookie
+    res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
+
+    try {
+      await updateUser(user.id, { access_token: accessToken });
+    } catch (err) {
+      console.error("Failed to update access token on user:", err.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Signed in with Google successfully.",
+      accessToken,
+      token: accessToken,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone || null,
+        role: user.role,
+        image: user.image || payload.picture || null,
+        is_active: user.is_active !== false,
+        is_blocked: Boolean(user.is_blocked),
+        block_reason: user.block_reason || null,
+      },
+    });
+  } catch (error) {
+    console.error("Google Auth controller error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An unexpected error occurred during Google sign-in.",
+    });
   }
 }
 
@@ -1813,6 +2020,7 @@ module.exports = {
   register,
   registerAdmin,
   login,
+  googleAuth,
   adminLogin,
   verifyOtp,
   refreshAccessToken,

@@ -4,6 +4,7 @@ const {
   register,
   registerAdmin,
   login,
+  googleAuth,
   adminLogin,
   sendOtp,
   verifyOtp,
@@ -40,6 +41,7 @@ const {
 } = require("../../../middleware/rateLimiter");
 
 router.post("/login", login);
+router.post("/google", googleAuth);
 router.post("/admin-login", adminLogin);
 
 async function allowInitialAdmin(req, res, next) {
