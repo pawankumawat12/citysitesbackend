@@ -39,6 +39,7 @@ const {
   generateAccessToken,
   generateRefreshToken,
   getRefreshTokenCookieOptions,
+  getAccessTokenCookieOptions,
   getCookieClearOptions,
 } = require("../../../config/helper");
 
@@ -465,7 +466,8 @@ const verifyOtp = async (req, res) => {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // Set secure HttpOnly refreshToken cookie
+    // Set secure HttpOnly refreshToken and accessToken cookies
+    res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
     res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
     // Clear OTP and reset attempts so OTP cannot be reused
@@ -807,7 +809,8 @@ async function login(req, res) {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // Set secure HttpOnly refreshToken cookie
+    // Set secure HttpOnly refreshToken and accessToken cookies
+    res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
     res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
     await updateUser(user.id, { access_token: accessToken });
@@ -866,6 +869,7 @@ async function adminLogin(req, res) {
       const accessToken = generateAccessToken(admin);
       const refreshToken = generateRefreshToken(admin);
 
+      res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
       res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
       try {
@@ -1023,7 +1027,8 @@ async function googleAuth(req, res) {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // Set secure HttpOnly refreshToken cookie
+    // Set secure HttpOnly refreshToken and accessToken cookies
+    res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
     res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
     try {
@@ -1101,7 +1106,8 @@ const refreshAccessToken = async (req, res) => {
     const newAccessToken = generateAccessToken(user);
     const newRefreshToken = generateRefreshToken(user);
 
-    // Rotate refresh token cookie
+    // Rotate refresh token and access token cookies
+    res.cookie("accessToken", newAccessToken, getAccessTokenCookieOptions(req));
     res.cookie("refreshToken", newRefreshToken, getRefreshTokenCookieOptions(req));
 
     try {
@@ -1143,7 +1149,15 @@ const getMe = async (req, res) => {
     const user = await findUserById(req.user.id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    const token =
+      (req.headers.authorization && req.headers.authorization.startsWith("Bearer ")
+        ? req.headers.authorization.split(" ")[1]
+        : null) || req.cookies?.accessToken || null;
+
     return res.status(200).json({
+      success: true,
+      token,
+      accessToken: token,
       user: {
         id: user.id,
         name: user.name,
@@ -1151,6 +1165,7 @@ const getMe = async (req, res) => {
         phone: user.phone,
         role: user.role,
         image: user.image,
+        token,
         is_active: user.is_active !== false,
         is_blocked: Boolean(user.is_blocked),
         block_reason: user.block_reason || null,
@@ -1462,7 +1477,8 @@ const verifyEmailChange = async (req, res) => {
     const accessToken = generateAccessToken(updatedUser);
     const refreshToken = generateRefreshToken(updatedUser);
 
-    // Set secure HttpOnly refreshToken cookie
+    // Set secure HttpOnly refreshToken and accessToken cookies
+    res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
     res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
 
     return res.status(200).json({

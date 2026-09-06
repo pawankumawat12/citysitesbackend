@@ -50,27 +50,37 @@ const rawOrigins = [
 
 const allowedOrigins = rawOrigins.map((o) => o.replace(/\/+$/, ""));
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps, curl, server-to-server)
-      if (!origin) return callback(null, true);
-      const normalizedOrigin = origin.replace(/\/+$/, "");
-      if (
-        allowedOrigins.includes(normalizedOrigin) ||
-        normalizedOrigin.endsWith(".vercel.app") ||
-        process.env.NODE_ENV !== "production"
-      ) {
-        return callback(null, true);
-      }
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile native webviews, curl, server-to-server)
+    if (!origin) return callback(null, true);
+    const normalizedOrigin = origin.replace(/\/+$/, "");
+    if (
+      allowedOrigins.includes(normalizedOrigin) ||
+      normalizedOrigin.endsWith(".vercel.app") ||
+      process.env.NODE_ENV !== "production"
+    ) {
       return callback(null, true);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "x-refresh-token"],
-    exposedHeaders: ["Set-Cookie"],
-  })
-);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-refresh-token",
+    "x-google-token",
+    "X-Requested-With",
+    "Accept",
+    "Cache-Control",
+    "Pragma",
+  ],
+  exposedHeaders: ["Set-Cookie"],
+  maxAge: 86400,
+};
+
+app.use(cors(corsOptions));
 
 app.use(
   express.json({
