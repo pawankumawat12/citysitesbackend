@@ -112,7 +112,7 @@ const uploadChatAttachment = multer({
   storage,
   fileFilter: chatFileFilter,
   limits: {
-    fileSize: 25 * 1024 * 1024, // 25 MB max
+    fileSize: 15 * 1024 * 1024, // 15 MB max
   },
 });
 

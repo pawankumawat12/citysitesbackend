@@ -341,7 +341,7 @@ const DashboardModel = {
       return {
         rank: index + 1,
         id: Number(r.id),
-        name: r.name || "Cafe Special",
+        name: r.name || "Bakery Special",
         price: Number(r.price),
         stock: Number(r.stock || 0),
         category: r.category_name || "Specialty",

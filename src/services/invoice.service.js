@@ -201,7 +201,7 @@ async function generateInvoicePdf(order, res) {
 
   items.forEach((item) => {
     const itemHeight = 22;
-    const name = item.name || item.product_name || "Cafe Item";
+    const name = item.name || item.product_name || "Bakery Item";
     const qty = Number(item.quantity) || 1;
     const price = Number(item.price) || 0;
     const itemTotal = qty * price;
