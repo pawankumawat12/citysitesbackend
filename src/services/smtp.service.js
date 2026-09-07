@@ -45,9 +45,9 @@ function getActiveSmtpConfig() {
     process.env.SMTP_FROM_EMAIL ||
     process.env.EMAIL_USER ||
     user ||
-    "noreply@sfccafe.com"
+    "noreply@sfcbakers.com"
   ).trim();
-  const from_name = (process.env.SMTP_FROM_NAME || "SFC Cafe").trim();
+  const from_name = (process.env.SMTP_FROM_NAME || "SFC Bakers").trim();
 
   return {
     host,

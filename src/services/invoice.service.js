@@ -19,7 +19,7 @@ async function generateInvoicePdf(order, res) {
     margin: 40,
     info: {
       Title: `Invoice #${order.order_number || order.id}`,
-      Author: "SFC CAFE",
+      Author: "SFC BAKERS",
       Subject: `Order Invoice ${order.order_number || order.id}`,
     },
   });
@@ -61,7 +61,7 @@ async function generateInvoicePdf(order, res) {
     .fontSize(22)
     .font("Helvetica-Bold")
     .fillColor("#ffffff")
-    .text("SFC CAFE", 60, 52);
+    .text("SFC BAKERS", 60, 52);
 
   doc
     .fontSize(9)
@@ -97,7 +97,7 @@ async function generateInvoicePdf(order, res) {
     .fontSize(10)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text("SFC CAFE", 45, currentY + 12);
+    .text("SFC BAKERS", 45, currentY + 12);
 
   doc
     .fontSize(8)
@@ -107,7 +107,7 @@ async function generateInvoicePdf(order, res) {
       width: 220,
     })
     .text(`Phone: ${footerSettings?.phone_number || "+91 9876543210"}`, 45, currentY + 48)
-    .text(`Email: ${footerSettings?.email || "support@sfccafe.com"}`, 45, currentY + 60);
+    .text(`Email: ${footerSettings?.email || "support@sfcbakers.com"}`, 45, currentY + 60);
 
   // Metadata block on right
   doc
@@ -312,7 +312,7 @@ async function generateInvoicePdf(order, res) {
     .fontSize(8)
     .font("Helvetica-Bold")
     .fillColor(primaryColor)
-    .text("Thank you for ordering with SFC CAFE!", 40, footerY + 10, {
+    .text("Thank you for ordering with SFC BAKERS!", 40, footerY + 10, {
       align: "center",
       width: 515,
     });
@@ -323,7 +323,7 @@ async function generateInvoicePdf(order, res) {
     .fillColor(secondaryColor)
     .text(
       "This is a computer-generated invoice and requires no physical signature. For queries, contact us at " +
-        (footerSettings?.email || "support@sfccafe.com") +
+        (footerSettings?.email || "support@sfcbakers.com") +
         " or call " +
         (footerSettings?.phone_number || "+91 9876543210"),
       40,

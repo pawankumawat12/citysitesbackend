@@ -101,7 +101,7 @@ async function postOrderMessage(req, res) {
 
     const senderName =
       senderRole === "admin"
-        ? "SFC Cafe"
+        ? "SFC Bakers"
         : (order.customer_name || user.name || "Customer");
 
     // Persist message in database
@@ -160,7 +160,7 @@ async function postOrderMessage(req, res) {
             userId: order.user_id,
             role: "customer",
             type: "chat_message",
-            title: `New Message from SFC Cafe`,
+            title: `New Message from SFC Bakers`,
             message: `Regarding Order #${order.order_number || order.id}: ${(message || "").substring(0, 80)}`,
             orderId: order.id,
             dataJson: { orderId: order.id, messageText: message },

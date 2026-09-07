@@ -404,7 +404,13 @@ async function findOrdersByUser(userId, { page = 1, limit = 10, status = null } 
 }
 
 async function findOrderById(orderId, userId = null) {
-  let query = db("orders").where({ id: orderId });
+  let query = db("orders");
+  const trimmed = String(orderId || "").trim();
+  if (/^\d+$/.test(trimmed)) {
+    query = query.where({ id: Number(trimmed) });
+  } else {
+    query = query.where({ order_number: trimmed });
+  }
   if (userId) {
     query = query.where({ user_id: userId });
   }

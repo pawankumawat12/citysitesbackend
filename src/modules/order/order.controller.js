@@ -1350,8 +1350,8 @@ async function exportOrdersHandler(req, res) {
 
 async function downloadInvoiceHandler(req, res) {
   try {
-    const orderId = Number(req.params.id);
-    if (!orderId) {
+    const rawId = req.params.id;
+    if (!rawId || !String(rawId).trim()) {
       return res.status(400).json({
         success: false,
         message: "Invalid order ID",
@@ -1360,7 +1360,7 @@ async function downloadInvoiceHandler(req, res) {
 
     // Access control: admins can download invoice for any order; customers can only download their own
     const userId = req.user.role === "admin" ? null : req.user.id;
-    const order = await findOrderById(orderId, userId);
+    const order = await findOrderById(rawId, userId);
 
     if (!order) {
       return res.status(404).json({

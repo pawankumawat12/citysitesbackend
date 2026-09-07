@@ -162,7 +162,7 @@ async function processSingleJob(job) {
     }
 
     if (!resolvedSubject) {
-      resolvedSubject = "Notification from SFC Cafe";
+      resolvedSubject = "Notification from SFC Bakers";
     }
 
     // 2. Send via SMTP

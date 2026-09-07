@@ -127,7 +127,7 @@ async function createSiteReview(req, res) {
       role: "admin",
       type: "new_review",
       title: "New Store Review ⭐",
-      message: `${req.user?.name || "A customer"} rated SFC Cafe ${numRating} stars: "${comment.trim().slice(0, 80)}"`,
+      message: `${req.user?.name || "A customer"} rated SFC Bakers ${numRating} stars: "${comment.trim().slice(0, 80)}"`,
       dataJson: {
         reviewId: review.id,
         rating: numRating,

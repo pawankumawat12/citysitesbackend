@@ -481,7 +481,7 @@ const verifyOtp = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Email verified successfully! Welcome to SFC Cafe.",
+      message: "Email verified successfully! Welcome to SFC Bakers.",
       accessToken,
       token: accessToken,
       user: {

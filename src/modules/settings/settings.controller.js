@@ -296,7 +296,7 @@ async function testSmtp(req, res) {
         user: String(user).trim(),
         pass: testPass,
         from_email: from_email ? String(from_email).trim() : user,
-        from_name: from_name || "SFC Cafe",
+        from_name: from_name || "SFC Bakers",
         is_enabled: true,
       };
     }
