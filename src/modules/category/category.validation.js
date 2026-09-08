@@ -58,14 +58,22 @@ function validateCategoryCreate({ name, description, image, parentCategoryId, is
       errors.description = "Description must not exceed 2000 characters.";
     }
   }
-  if(!image){
+  if (!image) {
     errors.image = "Image is required.";
   }
 
-  if (parentCategoryId !== undefined && parentCategoryId !== null) {
+  let parsedParentId = null;
+  if (
+    parentCategoryId !== undefined &&
+    parentCategoryId !== null &&
+    parentCategoryId !== "" &&
+    parentCategoryId !== "null"
+  ) {
     const parsed = Number(parentCategoryId);
     if (!Number.isInteger(parsed) || parsed <= 0) {
       errors.parentCategoryId = "Parent category ID must be a positive integer.";
+    } else {
+      parsedParentId = parsed;
     }
   }
 
@@ -83,11 +91,8 @@ function validateCategoryCreate({ name, description, image, parentCategoryId, is
         description === undefined || description === null
           ? null
           : String(description).trim(),
-          image: typeof image === 'string' ? image: null,
-      parent_category_id:
-        parentCategoryId === undefined || parentCategoryId === null
-          ? null
-          : Number(parentCategoryId),
+      image: typeof image === "string" ? image : null,
+      parent_category_id: parsedParentId,
       is_active: parsedIsActive === undefined ? true : parsedIsActive,
     },
   };

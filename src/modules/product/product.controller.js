@@ -115,8 +115,22 @@ async function getProductById(req, res) {
 async function createProductHandler(req, res) {
   let uploadedResults = [];
   try {
-    const { name, description, price, stock, availabilityType, categoryId, isActive } =
+    const { name, description, price, stock, availabilityType, categoryId, isActive, images: bodyImages } =
       req.body || {};
+
+    let initialImages = [];
+    if (req.files && req.files.length > 0) {
+      initialImages = req.files;
+    } else if (bodyImages) {
+      try {
+        initialImages = typeof bodyImages === "string" ? JSON.parse(bodyImages) : bodyImages;
+      } catch {
+        initialImages = [bodyImages];
+      }
+      if (!Array.isArray(initialImages)) {
+        initialImages = [initialImages];
+      }
+    }
 
     const { valid, errors, data } = validateProductCreate({
       name,
@@ -124,7 +138,7 @@ async function createProductHandler(req, res) {
       price,
       stock,
       availabilityType,
-      images: [],
+      images: initialImages,
       categoryId,
       isActive,
     });
@@ -147,10 +161,13 @@ async function createProductHandler(req, res) {
       uploadedResults = await Promise.all(
         req.files.map((file) => uploadFile(file, { folder: "products" }))
       );
+      data.images = uploadedResults.map((r) => r.url);
+      data.image_keys = uploadedResults.map((r) => r.key);
+    } else {
+      data.images = initialImages;
+      data.image_keys = [];
     }
 
-    data.images = uploadedResults.map((r) => r.url);
-    data.image_keys = uploadedResults.map((r) => r.key);
     data.storage_provider = "cloudinary";
 
     const product = await createProduct(data);

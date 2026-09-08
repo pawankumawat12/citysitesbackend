@@ -88,12 +88,14 @@ async function getCategoryById(req, res) {
 async function createCategoryHandler(req, res) {
   let uploadRes = null;
   try {
-    const { name, description, parentCategoryId, isActive } = req.body;
+    const { name, description, parentCategoryId, isActive, image: bodyImage } = req.body || {};
+
+    const initialImage = req.file || bodyImage;
 
     const { valid, errors, data } = validateCategoryCreate({
       name,
       description,
-      image: undefined,
+      image: initialImage,
       parentCategoryId,
       isActive,
     });
@@ -119,6 +121,8 @@ async function createCategoryHandler(req, res) {
       data.image = uploadRes.url;
       data.storage_key = uploadRes.key;
       data.storage_provider = uploadRes.provider;
+    } else if (bodyImage) {
+      data.image = typeof bodyImage === "string" ? bodyImage : null;
     }
 
     const category = await createCategory(data);
