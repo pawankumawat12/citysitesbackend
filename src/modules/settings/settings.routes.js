@@ -13,12 +13,17 @@ const {
   getSmtp,
   updateSmtp,
   testSmtp,
+  getStoreStatus,
+  updateStoreStatus,
 } = require("./settings.controller");
 
 const router = express.Router();
 
 router.get("/theme", getTheme);
 router.put("/theme", verifyToken, isAdmin, updateTheme);
+
+router.get("/store-status", getStoreStatus);
+router.put("/store-status", verifyToken, isAdmin, updateStoreStatus);
 
 router.get("/footer", getFooter);
 router.put("/footer", verifyToken, isAdmin, updateFooter);

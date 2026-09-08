@@ -15,6 +15,7 @@ async function createMessage({
   attachmentSize = null,
   storageKey = null,
   storageProvider = null,
+  cloudinaryPublicId = null,
 }) {
   const insertData = {
     order_id: Number(orderId),
@@ -32,6 +33,10 @@ async function createMessage({
     insertData.attachment_size = attachmentSize;
     if (storageKey) insertData.storage_key = storageKey;
     if (storageProvider) insertData.storage_provider = storageProvider;
+    const resolvedPublicId = cloudinaryPublicId || storageKey;
+    if (resolvedPublicId) {
+      insertData.cloudinary_public_id = resolvedPublicId;
+    }
   }
 
   const [created] = await db("order_messages")
@@ -94,10 +99,31 @@ async function getUnreadCountForOrder(orderId, readerRole) {
   return Number(countRes?.count || 0);
 }
 
+/**
+ * Retrieve messages created before a specific cutoff timestamp
+ */
+async function findMessagesOlderThan(cutoffDate) {
+  return db("order_messages")
+    .where("created_at", "<", cutoffDate)
+    .select("*");
+}
+
+/**
+ * Delete messages by an array of IDs
+ */
+async function deleteMessagesByIds(ids) {
+  if (!ids || !ids.length) return 0;
+  return db("order_messages")
+    .whereIn("id", ids)
+    .del();
+}
+
 module.exports = {
   createMessage,
   getMessagesByOrderId,
   markOrderMessagesAsRead,
   getUnreadCountForOrder,
+  findMessagesOlderThan,
+  deleteMessagesByIds,
 };
 

@@ -5,6 +5,7 @@ const {
   getOrderMessages,
   postOrderMessage,
   markMessagesRead,
+  triggerChatCleanup,
 } = require("./chat.controller");
 
 const router = express.Router();
@@ -17,6 +18,7 @@ router.post(
   postOrderMessage
 );
 router.patch("/orders/:id/messages/read", markMessagesRead);
+router.post("/cleanup", triggerChatCleanup);
 
 module.exports = router;
 

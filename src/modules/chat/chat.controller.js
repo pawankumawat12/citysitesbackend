@@ -35,9 +35,12 @@ async function getOrderMessages(req, res) {
       readAt: new Date().toISOString(),
     });
 
+    const chatStatus = orderModel.getOrderChatStatus(order);
+
     return res.status(200).json({
       success: true,
       data: messages,
+      chatStatus,
     });
   } catch (error) {
     console.error("Error getting order messages:", error);
@@ -90,6 +93,17 @@ async function postOrderMessage(req, res) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
+    // Check if chat is expired (20 minutes after delivery)
+    const chatStatus = orderModel.getOrderChatStatus(order);
+    if (chatStatus.isExpired) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Chat support for this order has expired (closed 20 minutes after delivery).",
+        chatStatus,
+      });
+    }
+
     // Check ownership if not admin
     if (user.role !== "admin" && Number(order.user_id) !== Number(user.id)) {
       return res.status(403).json({ success: false, message: "Unauthorized to post message in this order" });
@@ -125,6 +139,7 @@ async function postOrderMessage(req, res) {
       attachmentSize,
       storageKey,
       storageProvider,
+      cloudinaryPublicId: storageKey,
     });
 
     // 1. Emit live message to order room (for active chat viewers)
@@ -223,9 +238,40 @@ async function markMessagesRead(req, res) {
   }
 }
 
+/**
+ * Manually trigger chat cleanup of messages older than 2 days
+ * and their Cloudinary attachments (Admin only).
+ */
+async function triggerChatCleanup(req, res) {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized: Admin access required.",
+      });
+    }
+
+    const { cleanupOldChatData } = require("../../services/chatCleanup.service");
+    const result = await cleanupOldChatData();
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Error triggering chat cleanup:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to perform chat cleanup",
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   getOrderMessages,
   postOrderMessage,
   markMessagesRead,
+  triggerChatCleanup,
 };
 

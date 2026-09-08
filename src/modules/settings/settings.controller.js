@@ -9,12 +9,15 @@ const {
   updateOrderPricingSettings,
   getSmtpSettings,
   updateSmtpSettings,
+  getStoreStatusSettings,
+  updateStoreStatusSettings,
 } = require("../../models/settings.model");
 const { testSmtpConnection } = require("../../services/smtp.service");
 const {
   uploadFile,
   deleteFile,
 } = require("../../services/storage/storage.service");
+const { emitToAll } = require("../../socket/socket.service");
 
 const ALLOWED_THEMES = ["light", "dark"];
 
@@ -339,6 +342,48 @@ async function testSmtp(req, res) {
   }
 }
 
+async function getStoreStatus(req, res) {
+  try {
+    const data = await getStoreStatusSettings();
+    return res.status(200).json({
+      success: true,
+      message: "Store status fetched successfully",
+      data,
+    });
+  } catch (error) {
+    console.error("Get store status error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch store status",
+    });
+  }
+}
+
+async function updateStoreStatus(req, res) {
+  try {
+    const { is_open, closed_message } = req.body;
+    const data = await updateStoreStatusSettings({ is_open, closed_message });
+
+    try {
+      emitToAll("store_status_changed", data);
+    } catch (socketErr) {
+      console.error("Socket emit error for store_status_changed:", socketErr);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Store status updated to ${data.is_open ? "Shop Open" : "Shop Closed"}`,
+      data,
+    });
+  } catch (error) {
+    console.error("Update store status error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update store status",
+    });
+  }
+}
+
 module.exports = {
   getTheme,
   updateTheme,
@@ -351,4 +396,6 @@ module.exports = {
   getSmtp,
   updateSmtp,
   testSmtp,
+  getStoreStatus,
+  updateStoreStatus,
 };

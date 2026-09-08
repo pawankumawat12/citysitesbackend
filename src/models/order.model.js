@@ -320,6 +320,63 @@ async function createOrderWithTransaction({
 }
 
 
+/**
+ * Calculate chat expiry and status for an order.
+ * Rule: Chat expires 20 minutes after the order is delivered/completed.
+ * Returns: { isExpired: boolean, canChat: boolean, expiresAt: string | null, remainingMinutes: number | null }
+ */
+function getOrderChatStatus(order) {
+  if (!order) {
+    return {
+      isExpired: false,
+      canChat: false,
+      expiresAt: null,
+      remainingMinutes: null,
+    };
+  }
+
+  const status = String(order.status || "").toLowerCase();
+  const isDeliveredOrCompleted = status === "delivered" || status === "completed";
+
+  if (!isDeliveredOrCompleted) {
+    return {
+      isExpired: false,
+      canChat: true,
+      expiresAt: null,
+      remainingMinutes: null,
+    };
+  }
+
+  const deliveredTime = order.delivered_at
+    ? new Date(order.delivered_at).getTime()
+    : order.updated_at
+    ? new Date(order.updated_at).getTime()
+    : null;
+
+  if (!deliveredTime || isNaN(deliveredTime)) {
+    return {
+      isExpired: false,
+      canChat: true,
+      expiresAt: null,
+      remainingMinutes: null,
+    };
+  }
+
+  const CHAT_EXPIRY_WINDOW_MS = 20 * 60 * 1000; // 20 minutes
+  const expiresAtMs = deliveredTime + CHAT_EXPIRY_WINDOW_MS;
+  const nowMs = Date.now();
+  const isExpired = nowMs >= expiresAtMs;
+  const remainingMs = Math.max(0, expiresAtMs - nowMs);
+  const remainingMinutes = isExpired ? 0 : Math.ceil(remainingMs / 60000);
+
+  return {
+    isExpired,
+    canChat: !isExpired,
+    expiresAt: new Date(expiresAtMs).toISOString(),
+    remainingMinutes,
+  };
+}
+
 function formatOrderRow(order) {
   if (!order) return null;
   let deliveryAddressJson = order.delivery_address_json;
@@ -340,11 +397,15 @@ function formatOrderRow(order) {
       paymentDetailsJson = JSON.parse(paymentDetailsJson);
     } catch {}
   }
+  const chatStatus = getOrderChatStatus(order);
+
   return {
     ...order,
     delivery_address_json: deliveryAddressJson,
     pricing_details_json: pricingDetailsJson,
     payment_details_json: paymentDetailsJson,
+    chat_status: chatStatus,
+    chatStatus,
   };
 }
 
@@ -517,6 +578,9 @@ async function updateOrderStatus(orderId, status) {
 
   if (status === "Delivered" || status === "Completed") {
     updatePayload.payment_status = "Paid";
+    if (!order.delivered_at) {
+      updatePayload.delivered_at = db.fn.now();
+    }
   }
 
   const [updated] = await db("orders")
@@ -674,6 +738,9 @@ async function bulkUpdateOrderStatus(ids, targetStatus, { cancelReason = "Cancel
         };
         if (targetStatus === "Delivered" || targetStatus === "Completed") {
           updatePayload.payment_status = "Paid";
+          if (!order.delivered_at) {
+            updatePayload.delivered_at = db.fn.now();
+          }
         }
         const [updated] = await db("orders")
           .where({ id: order.id })
@@ -711,4 +778,5 @@ module.exports = {
   updateOrderPaymentStatus,
   acceptOrder,
   rejectOrder,
+  getOrderChatStatus,
 };

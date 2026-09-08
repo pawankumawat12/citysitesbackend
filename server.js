@@ -42,6 +42,14 @@ async function startServer() {
     console.warn("[Server] Failed to start email queue worker:", queueErr.message);
   }
 
+  // Start scheduled chat cleanup cron worker (runs every 1 hour)
+  try {
+    const { startChatCleanupCron } = require("./src/services/chatCleanup.service");
+    startChatCleanupCron();
+  } catch (cleanupErr) {
+    console.warn("[Server] Failed to start chat cleanup cron:", cleanupErr.message);
+  }
+
   httpServer.listen(PORT, () => {
     console.log(`Server and Socket.IO running on port ${PORT}`);
   });

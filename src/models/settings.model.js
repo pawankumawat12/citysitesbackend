@@ -241,6 +241,30 @@ async function updateSmtpSettings(data) {
   return getSmtpSettings({ maskPassword: true });
 }
 
+const DEFAULT_STORE_STATUS = {
+  is_open: true,
+  closed_message: "Store is currently closed. We are not accepting new orders at this moment.",
+};
+
+async function getStoreStatusSettings() {
+  const status = await getSetting("store_status");
+  if (!status) return DEFAULT_STORE_STATUS;
+  return {
+    is_open: status.is_open !== undefined ? Boolean(status.is_open) : true,
+    closed_message: status.closed_message || DEFAULT_STORE_STATUS.closed_message,
+  };
+}
+
+async function updateStoreStatusSettings(data) {
+  const current = await getStoreStatusSettings();
+  const next = {
+    is_open: data.is_open !== undefined ? Boolean(data.is_open) : current.is_open,
+    closed_message: data.closed_message !== undefined ? String(data.closed_message) : current.closed_message,
+  };
+  await setSetting("store_status", next);
+  return next;
+}
+
 module.exports = {
   DEFAULT_COLOR_THEMES,
   getSetting,
@@ -256,4 +280,7 @@ module.exports = {
   updateOrderPricingSettings,
   getSmtpSettings,
   updateSmtpSettings,
+  DEFAULT_STORE_STATUS,
+  getStoreStatusSettings,
+  updateStoreStatusSettings,
 };

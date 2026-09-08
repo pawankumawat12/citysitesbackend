@@ -25,9 +25,22 @@ const { finalizePaidOrder, handleRefundProcessed } = require("../../services/ord
 const db = require("../../../config/db");
 const { incrementOfferUsage } = require("../../models/offer.model");
 const { generateInvoicePdf } = require("../../services/invoice.service");
+const { getStoreStatusSettings } = require("../../models/settings.model");
 
 async function createOrder(req, res) {
   try {
+    // 0. STORE AVAILABILITY CHECK: If store is closed, disallow creating new orders
+    const storeStatus = await getStoreStatusSettings();
+    if (!storeStatus.is_open) {
+      return res.status(400).json({
+        success: false,
+        message:
+          storeStatus.closed_message ||
+          "Store is currently closed. We are not accepting new orders at this moment.",
+        is_store_closed: true,
+      });
+    }
+
     const userId = req.user.id;
 
     const {
