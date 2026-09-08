@@ -5,6 +5,7 @@ const {
 const {
   findCategoryById,
   findCategories,
+  findCategoriesByIds,
   countCategories,
   countChildCategories,
   createCategory,
@@ -20,6 +21,11 @@ const {
   validateCategoryUpdate,
   validateCategoryListQuery,
 } = require("./category.validation");
+const {
+  uploadFile,
+  deleteFile,
+  deleteFiles,
+} = require("../../services/storage/storage.service");
 
 function parseIdParam(value) {
   const parsed = Number(value);
@@ -80,14 +86,14 @@ async function getCategoryById(req, res) {
 }
 
 async function createCategoryHandler(req, res) {
+  let uploadRes = null;
   try {
     const { name, description, parentCategoryId, isActive } = req.body;
-    const image = req.file ? `/uploads/${req.file.filename}` : undefined;
 
     const { valid, errors, data } = validateCategoryCreate({
       name,
       description,
-      image,
+      image: undefined,
       parentCategoryId,
       isActive,
     });
@@ -107,6 +113,14 @@ async function createCategoryHandler(req, res) {
         });
       }
     }
+
+    if (req.file) {
+      uploadRes = await uploadFile(req.file, { folder: "categories" });
+      data.image = uploadRes.url;
+      data.storage_key = uploadRes.key;
+      data.storage_provider = uploadRes.provider;
+    }
+
     const category = await createCategory(data);
 
     return res.status(201).json({
@@ -115,11 +129,15 @@ async function createCategoryHandler(req, res) {
     });
   } catch (error) {
     console.error("Create category error:", error);
+    if (uploadRes?.key || uploadRes?.url) {
+      deleteFile(uploadRes.key || uploadRes.url).catch(() => {});
+    }
     return res.status(500).json({ message: "Server error" });
   }
 }
 
 async function updateCategoryHandler(req, res) {
+  let uploadRes = null;
   try {
     const id = parseIdParam(req.params.id);
     if (!id) {
@@ -132,12 +150,11 @@ async function updateCategoryHandler(req, res) {
     }
 
     const { name, description, parentCategoryId, isActive } = req.body || {};
-    const image = req.file ? `/uploads/${req.file.filename}` : undefined;
     const { valid, errors, data } = validateCategoryUpdate({
       name,
       description,
       parentCategoryId,
-      image,
+      image: undefined,
       isActive,
     });
 
@@ -175,6 +192,20 @@ async function updateCategoryHandler(req, res) {
       }
     }
 
+    if (req.file) {
+      uploadRes = await uploadFile(req.file, { folder: "categories" });
+      data.image = uploadRes.url;
+      data.storage_key = uploadRes.key;
+      data.storage_provider = uploadRes.provider;
+
+      // Automatically delete previous category image to prevent orphaned files
+      if (existingCategory.storage_key || existingCategory.image) {
+        deleteFile(existingCategory.storage_key || existingCategory.image).catch((err) =>
+          console.warn("[CategoryController] Error deleting old category image:", err.message)
+        );
+      }
+    }
+
     const category = await updateCategory(id, data);
 
     return res.status(200).json({
@@ -183,6 +214,9 @@ async function updateCategoryHandler(req, res) {
     });
   } catch (error) {
     console.error("Update category error:", error);
+    if (uploadRes?.key || uploadRes?.url) {
+      deleteFile(uploadRes.key || uploadRes.url).catch(() => {});
+    }
     return res.status(500).json({ message: "Server error" });
   }
 }
@@ -214,6 +248,13 @@ async function deleteCategoryHandler(req, res) {
       return res.status(400).json({
         message: "Cannot delete category with associated products",
       });
+    }
+
+    // Automatically remove category image from Cloudinary
+    if (existingCategory.storage_key || existingCategory.image) {
+      deleteFile(existingCategory.storage_key || existingCategory.image).catch((err) =>
+        console.warn("[CategoryController] Error deleting category image on delete:", err.message)
+      );
     }
 
     await deleteCategory(id);
@@ -254,6 +295,18 @@ async function bulkDeleteCategoriesHandler(req, res) {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ message: "ids must be a non-empty array of category IDs" });
+    }
+
+    // Retrieve categories before deletion to remove their images
+    const categories = await findCategoriesByIds(ids);
+    const imagesToDelete = categories
+      .map((c) => c.storage_key || c.image)
+      .filter(Boolean);
+
+    if (imagesToDelete.length > 0) {
+      deleteFiles(imagesToDelete).catch((err) =>
+        console.warn("[CategoryController] Error deleting bulk category images:", err.message)
+      );
     }
 
     const result = await bulkDeleteCategories(ids);

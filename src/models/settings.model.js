@@ -140,8 +140,8 @@ async function getLogoSettings() {
   return logo || { logo_url: "" };
 }
 
-async function updateLogoSettings(logoUrl) {
-  const data = { logo_url: logoUrl };
+async function updateLogoSettings(logoInput) {
+  const data = typeof logoInput === "string" ? { logo_url: logoInput } : logoInput;
   await setSetting("logo", data);
   return data;
 }

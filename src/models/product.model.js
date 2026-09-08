@@ -16,13 +16,21 @@ const PRODUCT_COLUMNS = [
   "products.images",
   "products.category_id",
   "products.is_active",
+  "products.image_keys",
+  "products.storage_provider",
   "products.created_at",
   "products.updated_at",
 ];
 
 function serializeImages(data) {
-  if (!Array.isArray(data.images)) return data;
-  return { ...data, images: JSON.stringify(data.images) };
+  const result = { ...data };
+  if (Array.isArray(result.images)) {
+    result.images = JSON.stringify(result.images);
+  }
+  if (Array.isArray(result.image_keys)) {
+    result.image_keys = JSON.stringify(result.image_keys);
+  }
+  return result;
 }
 
 async function findProductById(id) {
@@ -205,9 +213,15 @@ function bulkDeleteProducts(ids) {
   return db("products").whereIn("id", ids).del();
 }
 
+function findProductsByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve([]);
+  return db("products").whereIn("id", ids).select(["id", "name", "images", "image_keys"]);
+}
+
 module.exports = {
   findProductById,
   findProducts,
+  findProductsByIds,
   countProducts,
   countProductsByCategory,
   createProduct,

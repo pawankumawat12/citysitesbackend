@@ -1,13 +1,5 @@
 const multer = require("multer");
 const path = require("path");
-const fs = require("fs");
-
-// Keep uploads in one predictable location regardless of where `node` is run.
-const uploadDir = path.join(__dirname, "..", "uploads");
-
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
 
 // Allowed extensions whitelist
 const ALLOWED_IMAGE_EXTENSIONS = new Set([
@@ -29,21 +21,9 @@ const ALLOWED_DOC_EXTENSIONS = new Set([
   ".zip",
 ]);
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    // Sanitize extension and generate unguessable unique file name
-    const rawExt = path.extname(file.originalname || "").toLowerCase();
-    const safeExt = rawExt.replace(/[^a-z0-9.]/g, "") || ".dat";
-    const uniqueName = `${Date.now()}-${Math.round(
-      Math.random() * 1e9
-    )}${safeExt}`;
-
-    cb(null, uniqueName);
-  },
-});
+// Multer memory storage: files are kept as in-memory buffers (file.buffer)
+// and never written to local disk.
+const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   const allowedMimeTypes = [
@@ -112,7 +92,7 @@ const uploadChatAttachment = multer({
   storage,
   fileFilter: chatFileFilter,
   limits: {
-    fileSize: 15 * 1024 * 1024, // 15 MB max
+    fileSize: 10 * 1024 * 1024, // 10 MB max
   },
 });
 

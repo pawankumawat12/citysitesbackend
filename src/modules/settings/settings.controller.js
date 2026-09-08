@@ -11,6 +11,10 @@ const {
   updateSmtpSettings,
 } = require("../../models/settings.model");
 const { testSmtpConnection } = require("../../services/smtp.service");
+const {
+  uploadFile,
+  deleteFile,
+} = require("../../services/storage/storage.service");
 
 const ALLOWED_THEMES = ["light", "dark"];
 
@@ -158,6 +162,7 @@ async function getLogo(req, res) {
 }
 
 async function updateLogo(req, res) {
+  let uploadRes = null;
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -166,8 +171,22 @@ async function updateLogo(req, res) {
       });
     }
 
-    const logoUrl = `/uploads/${req.file.filename}`;
-    const updated = await updateLogoSettings(logoUrl);
+    const currentLogo = await getLogoSettings();
+
+    uploadRes = await uploadFile(req.file, { folder: "settings" });
+
+    // Automatically remove previous logo from Cloudinary or local disk
+    if (currentLogo?.storage_key || currentLogo?.logo_url) {
+      deleteFile(currentLogo.storage_key || currentLogo.logo_url).catch((err) =>
+        console.warn("[SettingsController] Failed to delete old logo:", err.message)
+      );
+    }
+
+    const updated = await updateLogoSettings({
+      logo_url: uploadRes.url,
+      storage_key: uploadRes.key,
+      storage_provider: uploadRes.provider || "cloudinary",
+    });
 
     return res.status(200).json({
       success: true,
@@ -176,6 +195,9 @@ async function updateLogo(req, res) {
     });
   } catch (error) {
     console.error("Update logo error:", error);
+    if (uploadRes?.key || uploadRes?.url) {
+      deleteFile(uploadRes.key || uploadRes.url).catch(() => {});
+    }
     return res.status(500).json({
       success: false,
       message: "Failed to update logo",

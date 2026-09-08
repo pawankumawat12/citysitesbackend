@@ -186,6 +186,8 @@ async function createOffer(data) {
       buy_qty: buyQty,
       get_qty: getQty,
       banner_image: data.banner_image || null,
+      storage_key: data.storage_key || null,
+      storage_provider: data.storage_provider || "cloudinary",
       start_date: data.start_date ? new Date(data.start_date) : null,
       end_date: data.end_date ? new Date(data.end_date) : null,
       usage_limit: data.usage_limit != null ? Number(data.usage_limit) : null,
@@ -257,6 +259,8 @@ async function updateOffer(id, data) {
   if (data.buy_qty != null) updatePayload.buy_qty = Math.max(1, Number(data.buy_qty) || 1);
   if (data.get_qty != null) updatePayload.get_qty = Math.max(1, Number(data.get_qty) || 1);
   if (data.banner_image !== undefined) updatePayload.banner_image = data.banner_image;
+  if (data.storage_key !== undefined) updatePayload.storage_key = data.storage_key;
+  if (data.storage_provider !== undefined) updatePayload.storage_provider = data.storage_provider;
   if (data.start_date !== undefined) updatePayload.start_date = data.start_date ? new Date(data.start_date) : null;
   if (data.end_date !== undefined) updatePayload.end_date = data.end_date ? new Date(data.end_date) : null;
   if (data.usage_limit !== undefined) updatePayload.usage_limit = data.usage_limit != null ? Number(data.usage_limit) : null;

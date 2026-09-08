@@ -2,6 +2,7 @@ const orderModel = require("../../models/order.model");
 const orderMessageModel = require("../../models/orderMessage.model");
 const notificationModel = require("../../models/notification.model");
 const { emitToOrder, emitToAdmin, emitToUser, isAdminInOrderRoom, isCustomerInOrderRoom } = require("../../socket/socket.service");
+const { uploadFile } = require("../../services/storage/storage.service");
 
 /**
  * Get chat history for a specific order and mark unread messages as read
@@ -56,14 +57,21 @@ async function postOrderMessage(req, res) {
     let attachmentType = req.body?.attachmentType || null;
     let attachmentName = req.body?.attachmentName || null;
     let attachmentSize = req.body?.attachmentSize || null;
+    let storageKey = null;
+    let storageProvider = null;
 
     if (req.file) {
-      attachmentUrl = `/uploads/${req.file.filename}`;
+      const isImg = req.file.mimetype.startsWith("image/");
+      const uploadRes = await uploadFile(req.file, {
+        folder: "chat",
+        resourceType: isImg ? "image" : "auto",
+      });
+      attachmentUrl = uploadRes.url;
+      storageKey = uploadRes.key;
+      storageProvider = uploadRes.provider;
       attachmentName = req.file.originalname;
-      attachmentType = req.file.mimetype.startsWith("image/")
-        ? "image"
-        : "document";
-      const bytes = req.file.size || 0;
+      attachmentType = isImg ? "image" : "document";
+      const bytes = req.file.size || uploadRes.bytes || 0;
       const k = 1024;
       const sizes = ["B", "KB", "MB", "GB"];
       const i = bytes > 0 ? Math.floor(Math.log(bytes) / Math.log(k)) : 0;
@@ -115,6 +123,8 @@ async function postOrderMessage(req, res) {
       attachmentType,
       attachmentName,
       attachmentSize,
+      storageKey,
+      storageProvider,
     });
 
     // 1. Emit live message to order room (for active chat viewers)

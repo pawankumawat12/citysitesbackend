@@ -11,6 +11,8 @@ const HERO_SLIDER_COLUMNS = [
   "secondary_cta",
   "secondary_href",
   "image",
+  "storage_key",
+  "storage_provider",
   "display_order",
   "is_active",
   "created_at",

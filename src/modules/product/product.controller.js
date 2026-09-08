@@ -12,6 +12,7 @@ const {
   deleteProduct,
   bulkUpdateProductStatus,
   bulkDeleteProducts,
+  findProductsByIds,
 } = require("../../models/product.model");
 const {
   listActiveOffersCustomer,
@@ -23,6 +24,11 @@ const {
   validateProductUpdate,
   validateProductListQuery,
 } = require("./product.validation");
+const {
+  uploadFile,
+  deleteFile,
+  deleteFiles,
+} = require("../../services/storage/storage.service");
 
 function parseIdParam(value) {
   const parsed = Number(value);
@@ -107,18 +113,18 @@ async function getProductById(req, res) {
 }
 
 async function createProductHandler(req, res) {
+  let uploadedResults = [];
   try {
     const { name, description, price, stock, availabilityType, categoryId, isActive } =
       req.body || {};
 
-    const images = (req.files || []).map((file) => `/uploads/${file.filename}`);
     const { valid, errors, data } = validateProductCreate({
       name,
       description,
       price,
       stock,
       availabilityType,
-      images,
+      images: [],
       categoryId,
       isActive,
     });
@@ -137,6 +143,16 @@ async function createProductHandler(req, res) {
       });
     }
 
+    if (req.files && req.files.length > 0) {
+      uploadedResults = await Promise.all(
+        req.files.map((file) => uploadFile(file, { folder: "products" }))
+      );
+    }
+
+    data.images = uploadedResults.map((r) => r.url);
+    data.image_keys = uploadedResults.map((r) => r.key);
+    data.storage_provider = "cloudinary";
+
     const product = await createProduct(data);
     const productWithCategory = await findProductById(product.id);
 
@@ -146,6 +162,10 @@ async function createProductHandler(req, res) {
     });
   } catch (error) {
     console.error("Create product error:", error);
+
+    if (uploadedResults.length > 0) {
+      deleteFiles(uploadedResults.map((r) => r.key || r.url)).catch(() => {});
+    }
 
     if (error.code === "23503") {
       return res.status(400).json({
@@ -158,6 +178,7 @@ async function createProductHandler(req, res) {
 }
 
 async function updateProductHandler(req, res) {
+  let newUploadedResults = [];
   try {
     const id = parseIdParam(req.params.id);
 
@@ -186,9 +207,6 @@ async function updateProductHandler(req, res) {
       existingImages,
     } = req.body || {};
 
-    /*
-     * Existing images that frontend wants to keep
-     */
     let keptImages = [];
 
     if (existingImages) {
@@ -210,29 +228,8 @@ async function updateProductHandler(req, res) {
       });
     }
 
-    /*
-     * New uploaded images
-     */
-    const newImages = (req.files || []).map(
-      (file) => `/uploads/${file.filename}`
-    );
-
-    /*
-     * Final images
-     *
-     * Existing images user kept
-     * +
-     * Newly uploaded images
-     */
-    const images = [
-      ...keptImages,
-      ...newImages,
-    ];
-
-    /*
-     * Maximum 5 images
-     */
-    if (images.length > 5) {
+    const newFilesCount = (req.files || []).length;
+    if (keptImages.length + newFilesCount > 5) {
       return res.status(400).json({
         message: "Maximum 5 images are allowed",
       });
@@ -245,7 +242,7 @@ async function updateProductHandler(req, res) {
         price,
         stock,
         availabilityType,
-        images,
+        images: keptImages,
         categoryId,
         isActive,
       });
@@ -269,6 +266,37 @@ async function updateProductHandler(req, res) {
       }
     }
 
+    // Identify images removed by user and delete them from Cloudinary
+    const previousImages = Array.isArray(existingProduct.images) ? existingProduct.images : [];
+    const removedImages = previousImages.filter((img) => !keptImages.includes(img));
+    if (removedImages.length > 0) {
+      deleteFiles(removedImages).catch((err) =>
+        console.warn("[ProductController] Failed to delete removed product images:", err.message)
+      );
+    }
+
+    // Upload newly added files
+    if (req.files && req.files.length > 0) {
+      newUploadedResults = await Promise.all(
+        req.files.map((file) => uploadFile(file, { folder: "products" }))
+      );
+    }
+
+    const newImageUrls = newUploadedResults.map((r) => r.url);
+    const newImageKeys = newUploadedResults.map((r) => r.key);
+
+    const previousKeys = Array.isArray(existingProduct.image_keys) ? existingProduct.image_keys : [];
+    const keptKeys = keptImages
+      .map((img) => {
+        const idx = previousImages.indexOf(img);
+        return idx !== -1 && previousKeys[idx] ? previousKeys[idx] : null;
+      })
+      .filter(Boolean);
+
+    data.images = [...keptImages, ...newImageUrls];
+    data.image_keys = [...keptKeys, ...newImageKeys];
+    data.storage_provider = "cloudinary";
+
     await updateProduct(id, data);
 
     const product = await findProductById(id);
@@ -279,6 +307,10 @@ async function updateProductHandler(req, res) {
     });
   } catch (error) {
     console.error("Update product error:", error);
+
+    if (newUploadedResults.length > 0) {
+      deleteFiles(newUploadedResults.map((r) => r.key || r.url)).catch(() => {});
+    }
 
     if (error.code === "23503") {
       return res.status(400).json({
@@ -302,6 +334,13 @@ async function deleteProductHandler(req, res) {
     const existingProduct = await findProductById(id);
     if (!existingProduct) {
       return res.status(404).json({ message: "Product not found" });
+    }
+
+    // Automatically remove product images from Cloudinary to prevent orphaned files
+    if (Array.isArray(existingProduct.images) && existingProduct.images.length > 0) {
+      deleteFiles(existingProduct.images).catch((err) =>
+        console.warn("[ProductController] Error deleting product images on product delete:", err.message)
+      );
     }
 
     await deleteProduct(id);
@@ -342,6 +381,21 @@ async function bulkDeleteProductsHandler(req, res) {
     const { ids } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
       return res.status(400).json({ message: "ids must be a non-empty array of product IDs" });
+    }
+
+    // Retrieve products to remove their images from Cloudinary before deleting
+    const products = await findProductsByIds(ids);
+    const allImages = [];
+    products.forEach((p) => {
+      if (Array.isArray(p.images)) {
+        allImages.push(...p.images);
+      }
+    });
+
+    if (allImages.length > 0) {
+      deleteFiles(allImages).catch((err) =>
+        console.warn("[ProductController] Error deleting bulk product images:", err.message)
+      );
     }
 
     const deletedCount = await bulkDeleteProducts(ids);

@@ -13,6 +13,8 @@ async function createMessage({
   attachmentType = null,
   attachmentName = null,
   attachmentSize = null,
+  storageKey = null,
+  storageProvider = null,
 }) {
   const insertData = {
     order_id: Number(orderId),
@@ -28,6 +30,8 @@ async function createMessage({
     insertData.attachment_type = attachmentType;
     insertData.attachment_name = attachmentName;
     insertData.attachment_size = attachmentSize;
+    if (storageKey) insertData.storage_key = storageKey;
+    if (storageProvider) insertData.storage_provider = storageProvider;
   }
 
   const [created] = await db("order_messages")

@@ -5,11 +5,18 @@ const CATEGORY_COLUMNS = [
   "name",
   "description",
   "image",
+  "storage_key",
+  "storage_provider",
   "parent_category_id",
   "is_active",
   "created_at",
   "updated_at",
 ];
+
+function findCategoriesByIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0) return Promise.resolve([]);
+  return db("categories").whereIn("id", ids).select(CATEGORY_COLUMNS);
+}
 
 function findCategoryById(id) {
   return db("categories").where({ id }).first();
@@ -186,6 +193,7 @@ async function bulkDeleteCategories(ids) {
 module.exports = {
   findCategoryById,
   findCategories,
+  findCategoriesByIds,
   countCategories,
   countChildCategories,
   createCategory,

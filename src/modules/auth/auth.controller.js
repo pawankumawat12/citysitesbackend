@@ -6,6 +6,10 @@ const fs = require("fs");
 const { OAuth2Client } = require("google-auth-library");
 const db = require("../../../config/db");
 const {
+  uploadFile,
+  deleteFile,
+} = require("../../services/storage/storage.service");
+const {
   validateRegister,
   validateLogin,
   validatePassword,
@@ -1599,29 +1603,25 @@ const updateProfile = async (req, res) => {
     };
 
     if (req.file) {
-      updateData.image = `/uploads/${req.file.filename}`;
-      // Clean up previous image if it was a local upload
-      if (currentUser.image && currentUser.image.startsWith("/uploads/")) {
-        const oldPath = path.join(__dirname, "../../..", currentUser.image);
-        if (fs.existsSync(oldPath)) {
-          try {
-            fs.unlinkSync(oldPath);
-          } catch (e) {
-            console.error("Failed to delete old avatar file:", e);
-          }
-        }
+      const uploadRes = await uploadFile(req.file, { folder: "avatars" });
+      updateData.image = uploadRes.url;
+      updateData.storage_key = uploadRes.key;
+      updateData.storage_provider = uploadRes.provider;
+
+      // Clean up previous avatar from Cloudinary or local disk
+      if (currentUser.storage_key || currentUser.image) {
+        deleteFile(currentUser.storage_key || currentUser.image).catch((e) =>
+          console.warn("[AuthController] Failed to delete old avatar file:", e.message)
+        );
       }
     } else if (remove_image === "true" || remove_image === true) {
       updateData.image = null;
-      if (currentUser.image && currentUser.image.startsWith("/uploads/")) {
-        const oldPath = path.join(__dirname, "../../..", currentUser.image);
-        if (fs.existsSync(oldPath)) {
-          try {
-            fs.unlinkSync(oldPath);
-          } catch (e) {
-            console.error("Failed to delete old avatar file:", e);
-          }
-        }
+      updateData.storage_key = null;
+      updateData.storage_provider = null;
+      if (currentUser.storage_key || currentUser.image) {
+        deleteFile(currentUser.storage_key || currentUser.image).catch((e) =>
+          console.warn("[AuthController] Failed to delete old avatar file:", e.message)
+        );
       }
     }
 

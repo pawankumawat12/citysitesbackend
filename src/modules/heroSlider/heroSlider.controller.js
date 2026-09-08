@@ -1,5 +1,3 @@
-const path = require("path");
-const fs = require("fs");
 const {
   parsePagination,
   buildPaginationMeta,
@@ -16,6 +14,10 @@ const {
   deleteSlider,
   reorderSliders,
 } = require("../../models/heroSlider.model");
+const {
+  uploadFile,
+  deleteFile,
+} = require("../../services/storage/storage.service");
 
 function parseIdParam(value) {
   const parsed = Number(value);
@@ -137,8 +139,14 @@ async function createSliderHandler(req, res) {
     }
 
     let image = "";
+    let storageKey = null;
+    let storageProvider = null;
+
     if (req.file) {
-      image = `/uploads/${req.file.filename}`;
+      const uploadRes = await uploadFile(req.file, { folder: "hero-sliders" });
+      image = uploadRes.url;
+      storageKey = uploadRes.key;
+      storageProvider = uploadRes.provider;
     } else if (req.body.image && typeof req.body.image === "string" && req.body.image.trim()) {
       image = req.body.image.trim();
     }
@@ -173,6 +181,8 @@ async function createSliderHandler(req, res) {
       secondary_cta: (secondary_cta ?? secondaryCta ?? "View Menu")?.trim() || null,
       secondary_href: (secondary_href ?? secondaryHref ?? "/menu")?.trim() || null,
       image,
+      storage_key: storageKey,
+      storage_provider: storageProvider || "cloudinary",
       display_order: parsedOrder,
       is_active: activeVal,
     });
@@ -249,17 +259,16 @@ async function updateSliderHandler(req, res) {
     }
 
     if (req.file) {
-      updateData.image = `/uploads/${req.file.filename}`;
-      // Cleanup old local file if replacing with a new local file
-      if (existing.image && existing.image.startsWith("/uploads/")) {
-        const oldPath = path.join(__dirname, "../../../", existing.image);
-        if (fs.existsSync(oldPath)) {
-          try {
-            fs.unlinkSync(oldPath);
-          } catch (err) {
-            console.warn("Failed to delete old image:", err.message);
-          }
-        }
+      const uploadRes = await uploadFile(req.file, { folder: "hero-sliders" });
+      updateData.image = uploadRes.url;
+      updateData.storage_key = uploadRes.key;
+      updateData.storage_provider = uploadRes.provider;
+
+      // Automatically delete old image from Cloudinary or local disk
+      if (existing.storage_key || existing.image) {
+        deleteFile(existing.storage_key || existing.image).catch((err) =>
+          console.warn("[HeroSliderController] Failed to delete old slider image:", err.message)
+        );
       }
     } else if (bodyImage && typeof bodyImage === "string" && bodyImage.trim()) {
       updateData.image = bodyImage.trim();
@@ -359,16 +368,11 @@ async function deleteSliderHandler(req, res) {
       return res.status(404).json({ success: false, message: "Slider not found" });
     }
 
-    // If local image, delete file
-    if (existing.image && existing.image.startsWith("/uploads/")) {
-      const localPath = path.join(__dirname, "../../../", existing.image);
-      if (fs.existsSync(localPath)) {
-        try {
-          fs.unlinkSync(localPath);
-        } catch (err) {
-          console.warn("Failed to delete slider image file:", err.message);
-        }
-      }
+    // Automatically delete image from Cloudinary or local disk
+    if (existing.storage_key || existing.image) {
+      deleteFile(existing.storage_key || existing.image).catch((err) =>
+        console.warn("[HeroSliderController] Failed to delete slider image on delete:", err.message)
+      );
     }
 
     await deleteSlider(id);

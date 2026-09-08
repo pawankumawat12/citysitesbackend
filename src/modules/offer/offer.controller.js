@@ -1,5 +1,9 @@
 const offerModel = require("../../models/offer.model");
 const { getCartItems } = require("../../models/cart.model");
+const {
+  uploadFile,
+  deleteFile,
+} = require("../../services/storage/storage.service");
 
 async function getActiveOffers(req, res) {
   try {
@@ -119,11 +123,24 @@ async function getOffer(req, res) {
 }
 
 async function createOfferHandler(req, res) {
+  let uploadRes = null;
   try {
-    const bannerImage = req.file ? `/uploads/${req.file.filename}` : req.body.banner_image;
+    let bannerImage = req.body.banner_image || null;
+    let storageKey = null;
+    let storageProvider = null;
+
+    if (req.file) {
+      uploadRes = await uploadFile(req.file, { folder: "offers" });
+      bannerImage = uploadRes.url;
+      storageKey = uploadRes.key;
+      storageProvider = uploadRes.provider;
+    }
+
     const offer = await offerModel.createOffer({
       ...req.body,
       banner_image: bannerImage,
+      storage_key: storageKey,
+      storage_provider: storageProvider || "cloudinary",
     });
     return res.status(201).json({
       success: true,
@@ -132,6 +149,9 @@ async function createOfferHandler(req, res) {
     });
   } catch (error) {
     console.error("Create offer error:", error);
+    if (uploadRes?.key || uploadRes?.url) {
+      deleteFile(uploadRes.key || uploadRes.url).catch(() => {});
+    }
     return res.status(400).json({
       success: false,
       message: error?.message || "Failed to create offer",
@@ -140,12 +160,37 @@ async function createOfferHandler(req, res) {
 }
 
 async function updateOfferHandler(req, res) {
+  let uploadRes = null;
   try {
     const { id } = req.params;
-    const bannerImage = req.file ? `/uploads/${req.file.filename}` : req.body.banner_image;
+    const existing = await offerModel.findOfferById(id);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "Offer not found" });
+    }
+
+    let bannerImage = req.body.banner_image;
+    let storageKey = undefined;
+    let storageProvider = undefined;
+
+    if (req.file) {
+      uploadRes = await uploadFile(req.file, { folder: "offers" });
+      bannerImage = uploadRes.url;
+      storageKey = uploadRes.key;
+      storageProvider = uploadRes.provider;
+
+      // Automatically delete old banner image from Cloudinary
+      if (existing.storage_key || existing.banner_image) {
+        deleteFile(existing.storage_key || existing.banner_image).catch((err) =>
+          console.warn("[OfferController] Failed to delete old offer banner:", err.message)
+        );
+      }
+    }
+
     const offer = await offerModel.updateOffer(id, {
       ...req.body,
       ...(bannerImage !== undefined ? { banner_image: bannerImage } : {}),
+      ...(storageKey !== undefined ? { storage_key: storageKey } : {}),
+      ...(storageProvider !== undefined ? { storage_provider: storageProvider } : {}),
     });
     return res.status(200).json({
       success: true,
@@ -154,6 +199,9 @@ async function updateOfferHandler(req, res) {
     });
   } catch (error) {
     console.error("Update offer error:", error);
+    if (uploadRes?.key || uploadRes?.url) {
+      deleteFile(uploadRes.key || uploadRes.url).catch(() => {});
+    }
     return res.status(400).json({
       success: false,
       message: error?.message || "Failed to update offer",
@@ -183,13 +231,22 @@ async function toggleOfferStatusHandler(req, res) {
 async function deleteOfferHandler(req, res) {
   try {
     const { id } = req.params;
-    const deleted = await offerModel.deleteOffer(id);
-    if (!deleted) {
+    const existing = await offerModel.findOfferById(id);
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: "Offer not found or already deleted",
       });
     }
+
+    // Automatically remove banner image from Cloudinary
+    if (existing.storage_key || existing.banner_image) {
+      deleteFile(existing.storage_key || existing.banner_image).catch((err) =>
+        console.warn("[OfferController] Failed to delete offer banner on delete:", err.message)
+      );
+    }
+
+    const deleted = await offerModel.deleteOffer(id);
     return res.status(200).json({
       success: true,
       message: "Offer deleted permanently",
