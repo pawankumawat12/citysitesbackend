@@ -945,13 +945,20 @@ async function cancelUserOrder(req, res) {
 async function updatePaymentStatusController(req, res) {
   try {
     const orderId = Number(req.params.id);
-    const { paymentStatus, refundReason } = req.body || {};
+    const { paymentStatus, refundReason, amount } = req.body || {};
 
-    const allowed = ["Pending", "Paid", "Failed", "Refunded"];
-    if (!paymentStatus || !allowed.includes(paymentStatus)) {
+    const allowed = [
+      "Pending",
+      "Paid",
+      "Failed",
+      "Refunded",
+      "Partially Refunded",
+      "PARTIALLY_REFUNDED",
+    ];
+    if (!paymentStatus || !allowed.some((a) => a.toLowerCase() === paymentStatus.toLowerCase())) {
       return res.status(400).json({
         success: false,
-        message: `Invalid payment status. Allowed: ${allowed.join(", ")}`,
+        message: `Invalid payment status. Allowed: Pending, Paid, Failed, Refunded, Partially Refunded`,
       });
     }
 
@@ -963,50 +970,171 @@ async function updatePaymentStatusController(req, res) {
       });
     }
 
-    // If changing to Refunded for an online payment with transaction ID
-    if (
-      paymentStatus === "Refunded" &&
-      order.payment_status !== "Refunded" &&
-      order.payment_method === "Online Payment" &&
-      order.transaction_id
-    ) {
-      let refundResult;
-      try {
-        refundResult = await initiateRazorpayRefund({
-          paymentId: order.transaction_id,
-          amount: order.total_amount,
-          notes: {
-            order_id: String(order.id),
-            order_number: order.order_number || String(order.id),
-            reason: refundReason || "Admin marked order as Refunded",
-          },
-        });
-      } catch (refundErr) {
-        console.error("Razorpay refund error during status update:", refundErr);
-        return res.status(400).json({
-          success: false,
-          message: `Failed to initiate Razorpay refund: ${refundErr.message}`,
-        });
-      }
+    const currentStatus = (order.payment_status || "Pending").trim();
+    const currentStatusLower = currentStatus.toLowerCase();
+    const targetStatusLower = paymentStatus.trim().toLowerCase();
 
-      const updated = await handleRefundProcessed({
-        orderId: order.id,
-        razorpayPaymentId: order.transaction_id,
-        refundEntity: refundResult,
-        notes: {
-          local_order_id: order.id,
-          reason: refundReason,
-        },
-      });
-
-      return res.status(200).json({
-        success: true,
-        message: "Payment refunded successfully via Razorpay",
-        data: updated,
+    // RULE 1: If payment is REFUNDED, it is permanently locked and Admin cannot change it
+    if (currentStatusLower === "refunded") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment is already Refunded and is permanently locked. No further status changes are allowed.",
       });
     }
 
-    const updated = await updateOrderPaymentStatus(orderId, paymentStatus);
+    const isOnline =
+      order.payment_method &&
+      !order.payment_method.toLowerCase().includes("cash") &&
+      !order.payment_method.toLowerCase().includes("cod");
+
+    // RULE 2: Online/Razorpay: If PAID, Admin cannot change it to PENDING or FAILED
+    if (isOnline && currentStatusLower === "paid") {
+      if (targetStatusLower === "pending" || targetStatusLower === "failed") {
+        return res.status(400).json({
+          success: false,
+          message: "Online payments that are already Paid cannot be changed to Pending or Failed.",
+        });
+      }
+    }
+
+    // RULE 3: Partially Refunded orders cannot be set back to Pending, Failed, or Paid
+    if (
+      currentStatusLower === "partially refunded" ||
+      currentStatusLower === "partially_refunded"
+    ) {
+      if (
+        targetStatusLower === "pending" ||
+        targetStatusLower === "failed" ||
+        targetStatusLower === "paid"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Partially refunded orders cannot be set back to Pending, Failed, or Paid. Only further refunds can be processed.",
+        });
+      }
+    }
+
+    // RULE 4: Refund status must be updated based on Razorpay response, not arbitrary frontend input
+    if (
+      targetStatusLower === "refunded" ||
+      targetStatusLower === "partially refunded" ||
+      targetStatusLower === "partially_refunded"
+    ) {
+      if (isOnline) {
+        // Online payments MUST be refunded via Razorpay API
+        if (!order.transaction_id && !order.razorpay_payment_id) {
+          return res.status(400).json({
+            success: false,
+            message: "Cannot refund online order: Missing Razorpay transaction/payment ID.",
+          });
+        }
+
+        if (
+          currentStatusLower !== "paid" &&
+          currentStatusLower !== "partially refunded" &&
+          currentStatusLower !== "partially_refunded"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: `Cannot refund an unpaid order. Payment status is ${currentStatus}.`,
+          });
+        }
+
+        const paymentDetails =
+          typeof order.payment_details_json === "string"
+            ? JSON.parse(order.payment_details_json || "{}")
+            : order.payment_details_json || {};
+        const refunds = Array.isArray(paymentDetails.refunds) ? paymentDetails.refunds : [];
+        const totalRefundedSoFar = refunds
+          .filter((r) => r.status === "processed" || !r.status || r.status === "created")
+          .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+        const remainingBalance = Math.max(0, Number(order.total_amount || 0) - totalRefundedSoFar);
+        if (remainingBalance <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: "This order is already fully refunded.",
+          });
+        }
+
+        const reqAmount = amount !== undefined && amount !== null && amount !== ""
+          ? Number(amount)
+          : remainingBalance;
+
+        if (isNaN(reqAmount) || reqAmount <= 0) {
+          return res.status(400).json({
+            success: false,
+            message: "Refund amount must be greater than 0.",
+          });
+        }
+
+        if (reqAmount > remainingBalance + 0.01) {
+          return res.status(400).json({
+            success: false,
+            message: `Refund amount (₹${reqAmount.toFixed(2)}) cannot exceed remaining balance of ₹${remainingBalance.toFixed(2)}.`,
+          });
+        }
+
+        let refundResult;
+        try {
+          refundResult = await initiateRazorpayRefund({
+            paymentId: order.transaction_id || order.razorpay_payment_id,
+            amount: reqAmount,
+            notes: {
+              order_id: String(order.id),
+              order_number: order.order_number || String(order.id),
+              reason: refundReason || "Admin initiated refund",
+            },
+          });
+        } catch (refundErr) {
+          console.error("Razorpay refund error during status update:", refundErr);
+          return res.status(400).json({
+            success: false,
+            message: `Failed to initiate Razorpay refund: ${refundErr.message}`,
+          });
+        }
+
+        // Status is calculated and updated strictly from Razorpay result
+        const updated = await handleRefundProcessed({
+          orderId: order.id,
+          razorpayPaymentId: order.transaction_id || order.razorpay_payment_id,
+          refundEntity: refundResult,
+          notes: {
+            local_order_id: order.id,
+            reason: refundReason,
+          },
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: `Refund processed successfully via Razorpay. Status is now ${updated.payment_status}.`,
+          data: updated,
+        });
+      } else {
+        // COD order refund: Can only refund if COD was already Paid
+        if (currentStatusLower !== "paid") {
+          return res.status(400).json({
+            success: false,
+            message: "Cannot mark unpaid COD order as Refunded. Payment must be Paid first.",
+          });
+        }
+      }
+    }
+
+    // RULE 5: COD - Keep existing Admin payment-status management; COD PENDING -> PAID allowed
+    // Format standardized target payment status
+    let normalizedTargetStatus = "Pending";
+    if (targetStatusLower === "paid") normalizedTargetStatus = "Paid";
+    else if (targetStatusLower === "failed") normalizedTargetStatus = "Failed";
+    else if (targetStatusLower === "refunded") normalizedTargetStatus = "Refunded";
+    else if (
+      targetStatusLower === "partially refunded" ||
+      targetStatusLower === "partially_refunded"
+    ) {
+      normalizedTargetStatus = "Partially Refunded";
+    }
+
+    const updated = await updateOrderPaymentStatus(orderId, normalizedTargetStatus);
 
     // Notify Customer in real-time
     if (order && order.user_id) {
@@ -1014,22 +1142,22 @@ async function updatePaymentStatusController(req, res) {
         userId: order.user_id,
         role: "customer",
         type: "payment_status",
-        title: `Payment Status: ${paymentStatus}`,
-        message: `Payment status for Order #${order.order_number || order.id} is now ${paymentStatus}.`,
+        title: `Payment Status: ${normalizedTargetStatus}`,
+        message: `Payment status for Order #${order.order_number || order.id} is now ${normalizedTargetStatus}.`,
         orderId: order.id,
-        dataJson: { orderId: order.id, paymentStatus },
+        dataJson: { orderId: order.id, paymentStatus: normalizedTargetStatus },
       });
 
       emitToUser(order.user_id, "payment_status_updated", {
         orderId: order.id,
         orderNumber: order.order_number || `#SFC-${order.id}`,
-        paymentStatus,
+        paymentStatus: normalizedTargetStatus,
       });
     }
 
     emitToOrder(orderId, "payment_status_updated", {
       orderId,
-      paymentStatus,
+      paymentStatus: normalizedTargetStatus,
     });
 
     emitToAdmin("admin_order_updated", {
@@ -1064,25 +1192,83 @@ async function refundOrderController(req, res) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    if (order.payment_status === "Refunded") {
+    const currentStatus = (order.payment_status || "Pending").trim();
+    const currentStatusLower = currentStatus.toLowerCase();
+
+    // 1. If payment is REFUNDED, it is permanently locked
+    if (currentStatusLower === "refunded") {
       return res.status(400).json({
         success: false,
-        message: "Order is already marked as Refunded",
+        message: "Order is already fully Refunded and is permanently locked.",
       });
     }
 
-    if (order.payment_method !== "Online Payment" || !order.transaction_id) {
+    // 2. Only allow refunding if Paid or Partially Refunded
+    if (
+      currentStatusLower !== "paid" &&
+      currentStatusLower !== "partially refunded" &&
+      currentStatusLower !== "partially_refunded"
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Refund via payment gateway is only available for online orders with transaction ID.",
+        message: `Cannot refund an unpaid order. Current payment status is ${currentStatus}.`,
       });
     }
 
-    const refundAmount = amount ? Number(amount) : Number(order.total_amount);
+    // 3. Online payment gateway validation
+    const isOnline =
+      order.payment_method &&
+      !order.payment_method.toLowerCase().includes("cash") &&
+      !order.payment_method.toLowerCase().includes("cod");
+
+    if (!isOnline || (!order.transaction_id && !order.razorpay_payment_id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Refund via payment gateway is only available for online orders with a valid transaction ID.",
+      });
+    }
+
+    // 4. Calculate existing refunds and remaining balance
+    const paymentDetails =
+      typeof order.payment_details_json === "string"
+        ? JSON.parse(order.payment_details_json || "{}")
+        : order.payment_details_json || {};
+    const existingRefunds = Array.isArray(paymentDetails.refunds) ? paymentDetails.refunds : [];
+    const totalRefundedSoFar = existingRefunds
+      .filter((r) => r.status === "processed" || !r.status || r.status === "created")
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    const remainingBalance = Math.max(0, Number(order.total_amount || 0) - totalRefundedSoFar);
+    if (remainingBalance <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "This order is already fully refunded.",
+      });
+    }
+
+    const refundAmount = amount !== undefined && amount !== null && amount !== ""
+      ? Number(amount)
+      : remainingBalance;
+
+    if (isNaN(refundAmount) || refundAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Refund amount must be greater than 0.",
+      });
+    }
+
+    if (refundAmount > remainingBalance + 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: `Refund amount (₹${refundAmount.toFixed(2)}) exceeds remaining balance of ₹${remainingBalance.toFixed(2)}.`,
+      });
+    }
+
+    // 5. Initiate Razorpay refund
     let refundResult;
     try {
       refundResult = await initiateRazorpayRefund({
-        paymentId: order.transaction_id,
+        paymentId: order.transaction_id || order.razorpay_payment_id,
         amount: refundAmount,
         notes: {
           order_id: String(order.id),
@@ -1098,9 +1284,10 @@ async function refundOrderController(req, res) {
       });
     }
 
+    // 6. Update status based on Razorpay response, NOT frontend input
     const updatedOrder = await handleRefundProcessed({
       orderId: order.id,
-      razorpayPaymentId: order.transaction_id,
+      razorpayPaymentId: order.transaction_id || order.razorpay_payment_id,
       refundEntity: refundResult,
       notes: {
         local_order_id: order.id,
@@ -1110,7 +1297,7 @@ async function refundOrderController(req, res) {
 
     return res.status(200).json({
       success: true,
-      message: "Refund processed successfully via Razorpay",
+      message: `Refund of ₹${refundAmount.toFixed(2)} processed successfully via Razorpay. Status is now ${updatedOrder.payment_status}.`,
       data: updatedOrder,
     });
   } catch (error) {

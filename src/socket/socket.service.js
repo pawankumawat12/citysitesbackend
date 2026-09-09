@@ -47,24 +47,30 @@ function initSocket(httpServer) {
 
   // =========================================================================
   // HANDSHAKE JWT AUTHENTICATION MIDDLEWARE
-  // Rejects all unauthenticated or invalid connections at the handshake level
+  // Authenticates valid users; permits guest connections for public broadcast events
   // =========================================================================
   io.use(async (socket, next) => {
     try {
       const token = extractToken(socket);
       if (!token) {
-        return next(new Error("Authentication error: Token required"));
+        // Guest/unauthenticated connection: allow connection for public broadcasts
+        socket.user = null;
+        return next();
       }
 
       let decoded;
       try {
         decoded = jwt.verify(token, ACCESS_SECRET);
       } catch (jwtErr) {
-        return next(new Error("Authentication error: Invalid or expired token"));
+        // Token invalid or expired: gracefully connect as guest for public broadcasts
+        console.warn("[Socket.IO] Handshake token verification failed, proceeding as guest:", jwtErr.message);
+        socket.user = null;
+        return next();
       }
 
       if (!decoded || !decoded.id) {
-        return next(new Error("Authentication error: Invalid token payload"));
+        socket.user = null;
+        return next();
       }
 
       const user = await db("users")
@@ -73,7 +79,8 @@ function initSocket(httpServer) {
         .first();
 
       if (!user) {
-        return next(new Error("Authentication error: User not found"));
+        socket.user = null;
+        return next();
       }
 
       if (user.role !== "admin" && (user.is_blocked || user.is_active === false)) {
@@ -101,7 +108,10 @@ function initSocket(httpServer) {
   io.on("connection", (socket) => {
     const user = socket.user;
     if (!user) {
-      socket.disconnect(true);
+      console.log(`[Socket.IO] Public/Guest connection established: ${socket.id}`);
+      socket.on("disconnect", (reason) => {
+        console.log(`[Socket.IO] Disconnected guest ${socket.id}: ${reason}`);
+      });
       return;
     }
 

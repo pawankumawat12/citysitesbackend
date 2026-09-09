@@ -1078,7 +1078,16 @@ const refreshAccessToken = async (req, res) => {
     if (!refreshToken) {
       const authHeader = req.headers.authorization;
       if (authHeader && authHeader.startsWith("Bearer ")) {
-        refreshToken = authHeader.split(" ")[1];
+        const candidate = authHeader.split(" ")[1];
+        try {
+          const payload = jwt.decode(candidate);
+          // Access tokens contain role; Refresh tokens only contain id
+          if (payload && !payload.role) {
+            refreshToken = candidate;
+          }
+        } catch {
+          // Ignore invalid token in Authorization header
+        }
       }
     }
 

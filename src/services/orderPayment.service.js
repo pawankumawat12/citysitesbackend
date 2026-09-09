@@ -654,20 +654,26 @@ async function handleRefundProcessed({
     }
 
     const refunds = Array.isArray(existingDetails.refunds)
-      ? existingDetails.refunds
+      ? [...existingDetails.refunds]
       : [];
 
     const refundAmount = refundEntity.amount
       ? Number(refundEntity.amount) / 100
       : Number(currentOrder.total_amount || 0);
 
-    refunds.push({
-      refund_id: refundEntity.id,
-      amount: refundAmount,
-      status: refundEntity.status || "processed",
-      created_at: new Date().toISOString(),
-      raw: refundEntity,
-    });
+    // Deduplicate: check if this refund_id was already added
+    const alreadyLogged =
+      refundEntity.id && refunds.some((r) => r.refund_id === refundEntity.id);
+
+    if (!alreadyLogged) {
+      refunds.push({
+        refund_id: refundEntity.id || `rfnd_local_${Date.now()}`,
+        amount: refundAmount,
+        status: refundEntity.status || "processed",
+        created_at: new Date().toISOString(),
+        raw: refundEntity,
+      });
+    }
 
     const updatedDetails = {
       ...existingDetails,
@@ -675,7 +681,14 @@ async function handleRefundProcessed({
       last_refund: refundEntity,
     };
 
-    const isFullRefund = refundAmount >= Number(currentOrder.total_amount || 0);
+    // Calculate cumulative successful/processed refunds
+    const cumulativeRefunded = refunds
+      .filter((r) => r.status === "processed" || !r.status || r.status === "created")
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    const orderTotal = Number(currentOrder.total_amount || 0);
+    const isFullRefund = cumulativeRefunded >= orderTotal - 0.01;
+    const newPaymentStatus = isFullRefund ? "Refunded" : "Partially Refunded";
 
     // If order was not cancelled, and full refund is issued, restore stock if it was previously deducted
     if (isFullRefund && currentOrder.status !== "Cancelled") {
@@ -698,7 +711,7 @@ async function handleRefundProcessed({
     const [updatedOrder] = await trx("orders")
       .where({ id: currentOrder.id })
       .update({
-        payment_status: "Refunded",
+        payment_status: newPaymentStatus,
         ...(isFullRefund && currentOrder.status !== "Cancelled"
           ? {
               status: "Cancelled",
@@ -713,6 +726,8 @@ async function handleRefundProcessed({
     return {
       updatedOrder,
       refundAmount,
+      cumulativeRefunded,
+      isFullRefund,
     };
   });
 
@@ -720,7 +735,8 @@ async function handleRefundProcessed({
     return null;
   }
 
-  const { updatedOrder, refundAmount, alreadyRefunded } = txResult;
+  const { updatedOrder, refundAmount, cumulativeRefunded, isFullRefund, alreadyRefunded } =
+    txResult;
 
   if (alreadyRefunded) {
     return updatedOrder;
@@ -728,18 +744,27 @@ async function handleRefundProcessed({
 
   // Notifications & Socket Events outside transaction
   try {
+    const isPartial = updatedOrder.payment_status === "Partially Refunded";
+    const titleText = isPartial
+      ? `Partial Refund Processed: #${updatedOrder.order_number || updatedOrder.id}`
+      : `Refund Processed: #${updatedOrder.order_number || updatedOrder.id}`;
+    const msgText = isPartial
+      ? `Partial refund of ₹${refundAmount.toFixed(2)} processed via Razorpay. Total refunded: ₹${cumulativeRefunded.toFixed(2)} of ₹${Number(updatedOrder.total_amount).toFixed(2)}.`
+      : `Full refund of ₹${refundAmount.toFixed(2)} processed for order #${updatedOrder.order_number || updatedOrder.id}.`;
+
     await notificationModel.createNotification({
       role: "admin",
       type: "order_status",
-      title: `Refund Processed: #${updatedOrder.order_number || updatedOrder.id}`,
-      message: `Refund of ₹${refundAmount.toFixed(2)} processed for order #${updatedOrder.order_number || updatedOrder.id}.`,
+      title: titleText,
+      message: msgText,
       orderId: updatedOrder.id,
       dataJson: {
         orderId: updatedOrder.id,
         orderNumber: updatedOrder.order_number,
         refundId: refundEntity.id,
         refundAmount,
-        paymentStatus: "Refunded",
+        cumulativeRefunded,
+        paymentStatus: updatedOrder.payment_status,
       },
     });
 
@@ -747,15 +772,17 @@ async function handleRefundProcessed({
       await notificationModel.createNotification({
         userId: updatedOrder.user_id,
         type: "order_status",
-        title: `Refund Processed: #${updatedOrder.order_number || updatedOrder.id}`,
-        message: `Your refund of ₹${refundAmount.toFixed(2)} for order #${updatedOrder.order_number || updatedOrder.id} has been processed.`,
+        title: titleText,
+        message: isPartial
+          ? `A partial refund of ₹${refundAmount.toFixed(2)} for order #${updatedOrder.order_number || updatedOrder.id} has been processed.`
+          : `Your refund of ₹${refundAmount.toFixed(2)} for order #${updatedOrder.order_number || updatedOrder.id} has been processed.`,
         orderId: updatedOrder.id,
       });
 
       emitToUser(updatedOrder.user_id, "payment_status_updated", {
         orderId: updatedOrder.id,
         orderNumber: updatedOrder.order_number,
-        paymentStatus: "Refunded",
+        paymentStatus: updatedOrder.payment_status,
         orderStatus: updatedOrder.status,
         order: updatedOrder,
       });
@@ -763,7 +790,7 @@ async function handleRefundProcessed({
 
     emitToAdmin("admin_order_updated", {
       order: updatedOrder,
-      message: `Refund of ₹${refundAmount.toFixed(2)} processed for order #${updatedOrder.order_number || updatedOrder.id}`,
+      message: msgText,
     });
   } catch (notifyErr) {
     console.warn("[OrderPaymentService] Refund notification warning:", notifyErr.message);

@@ -13,7 +13,7 @@ function getRevenueOrderRawCondition(tableAlias = "orders") {
     LOWER(${prefix}status) NOT IN ('cancelled', 'pending payment', 'payment failed')
     AND LOWER(COALESCE(${prefix}payment_status, '')) NOT IN ('refunded', 'failed')
     AND (
-      (${prefix}payment_method = 'Online Payment' AND ${prefix}payment_status = 'Paid')
+      (${prefix}payment_method = 'Online Payment' AND ${prefix}payment_status IN ('Paid', 'Partially Refunded'))
       OR
       (${prefix}payment_method = 'Cash on Delivery' AND (LOWER(${prefix}status) IN ('delivered', 'completed') OR ${prefix}payment_status = 'Paid'))
     )
