@@ -113,6 +113,36 @@ function getFirebaseAdmin() {
   return null;
 }
 
+let tableChecked = false;
+async function ensureTokensTableExists() {
+  if (tableChecked) return;
+  try {
+    const exists = await db.schema.hasTable("admin_device_tokens");
+    if (!exists) {
+      await db.schema.createTable("admin_device_tokens", (table) => {
+        table.increments("id").primary();
+        table
+          .integer("user_id")
+          .unsigned()
+          .references("id")
+          .inTable("users")
+          .onDelete("CASCADE");
+        table.string("role", 50).defaultTo("admin").index();
+        table.text("token").notNullable().unique().index();
+        table.string("device_type", 50).defaultTo("web");
+        table.text("device_info").nullable();
+        table.boolean("is_active").defaultTo(true).index();
+        table.timestamp("last_used_at").nullable();
+        table.timestamps(true, true);
+      });
+      console.log("[FCM Service] Created admin_device_tokens table automatically.");
+    }
+    tableChecked = true;
+  } catch {
+    tableChecked = true;
+  }
+}
+
 /**
  * Register or update an admin FCM device token.
  * Supports multiple devices per admin.
@@ -130,6 +160,7 @@ async function registerAdminToken({
   const cleanToken = token.trim();
 
   try {
+    await ensureTokensTableExists();
     const existing = await db("admin_device_tokens")
       .where({ token: cleanToken })
       .first();
@@ -205,6 +236,7 @@ async function sendAdminNewOrderNotification({
     }
 
     // 1. Fetch all active admin tokens
+    await ensureTokensTableExists();
     const activeRows = await db("admin_device_tokens")
       .where({ role: "admin", is_active: true })
       .select("id", "token");

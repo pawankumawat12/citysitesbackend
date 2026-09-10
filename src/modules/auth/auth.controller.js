@@ -59,6 +59,13 @@ const isEmailVerifyEnabled = () => {
   return String(val).trim().toLowerCase() === "true";
 };
 
+// Determines whether email delivery is active
+const isEmailActive = () => {
+  const val = process.env.EMAIL_ACTIVE;
+  if (val === undefined || val === null || val === "") return true;
+  return String(val).trim().toLowerCase() !== "false";
+};
+
 const hashResetToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
@@ -563,6 +570,50 @@ async function register(req, res) {
           }
         }
 
+        const shouldBypassVerification = !isEmailActive() || !isEmailVerifyEnabled();
+
+        if (shouldBypassVerification) {
+          await updateUser(existingUser.id, {
+            name: name ? name.trim() : existingUser.name,
+            phone: normalizedPhone || null,
+            password: hashedPassword,
+            is_email_verified: true,
+            otp: null,
+            expire_at: null,
+            otp_attempts: 0,
+          });
+
+          const verifiedUser = await findUserById(existingUser.id);
+          const accessToken = generateAccessToken(verifiedUser);
+          const refreshToken = generateRefreshToken(verifiedUser);
+          res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
+          res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
+          await updateUser(verifiedUser.id, { access_token: accessToken });
+
+          return res.status(200).json({
+            success: true,
+            message: "User registered successfully.",
+            accessToken,
+            token: accessToken,
+            user: {
+              id: verifiedUser.id,
+              name: verifiedUser.name,
+              email: verifiedUser.email,
+              token: accessToken,
+              phone: verifiedUser.phone,
+              role: verifiedUser.role,
+              image: verifiedUser.image,
+              is_active: verifiedUser.is_active !== false,
+              is_blocked: Boolean(verifiedUser.is_blocked),
+              block_reason: verifiedUser.block_reason || null,
+            },
+            data: {
+              email: normalizedEmail,
+              requiresVerification: false,
+            },
+          });
+        }
+
         await updateUser(existingUser.id, {
           name: name ? name.trim() : existingUser.name,
           phone: normalizedPhone || null,
@@ -608,15 +659,48 @@ async function register(req, res) {
       }
     }
 
-    // 3. Create fresh unverified user record
+    // 3. Create fresh user record (auto-verified if email delivery is disabled)
+    const shouldBypassVerification = !isEmailActive() || !isEmailVerifyEnabled();
+
     const user = await createUser({
       name: name.trim(),
       email: normalizedEmail,
       phone: normalizedPhone || null,
       password: hashedPassword,
       role: "user",
-      is_email_verified: false,
+      is_email_verified: shouldBypassVerification,
     });
+
+    if (shouldBypassVerification) {
+      const accessToken = generateAccessToken(user);
+      const refreshToken = generateRefreshToken(user);
+      res.cookie("accessToken", accessToken, getAccessTokenCookieOptions(req));
+      res.cookie("refreshToken", refreshToken, getRefreshTokenCookieOptions(req));
+      await updateUser(user.id, { access_token: accessToken });
+
+      return res.status(201).json({
+        success: true,
+        message: "User registered successfully.",
+        accessToken,
+        token: accessToken,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          token: accessToken,
+          phone: user.phone,
+          role: user.role,
+          image: user.image,
+          is_active: user.is_active !== false,
+          is_blocked: Boolean(user.is_blocked),
+          block_reason: user.block_reason || null,
+        },
+        data: {
+          email: normalizedEmail,
+          requiresVerification: false,
+        },
+      });
+    }
 
     const result = await issueVerificationOtp(user, normalizedEmail, updateUser, {
       resetResendPolicy: true,
