@@ -5,6 +5,8 @@ const {
   getUnreadCount,
   markRead,
   markAllRead,
+  registerAdminDeviceToken,
+  unregisterAdminDeviceToken,
 } = require("./notification.controller");
 
 const router = express.Router();
@@ -14,6 +16,8 @@ router.get("/", listNotifications);
 router.get("/unread-count", getUnreadCount);
 router.patch("/read-all", markAllRead);
 router.patch("/:id/read", markRead);
+router.post("/admin-token", registerAdminDeviceToken);
+router.delete("/admin-token", unregisterAdminDeviceToken);
 
 module.exports = router;
 

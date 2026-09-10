@@ -411,6 +411,25 @@ async function createOrder(req, res) {
       }
     );
 
+    // 10.1 FCM PUSH NOTIFICATION TO ADMIN (Non-blocking / Decoupled)
+    try {
+      const fcmNotificationService = require("../../services/fcmNotification.service");
+      setImmediate(() => {
+        fcmNotificationService
+          .sendAdminNewOrderNotification({
+            orderId: order.id,
+            orderNumber: order.order_number || String(order.id),
+            totalAmount: order.total_amount,
+            customerName: finalCustomerName,
+          })
+          .catch((err) =>
+            console.error("[FCM Push Service Error]:", err.message)
+          );
+      });
+    } catch (fcmErr) {
+      console.error("[FCM Push Service Init Error]:", fcmErr.message);
+    }
+
     // 11. RESPONSE
 
     return res.status(201).json({
