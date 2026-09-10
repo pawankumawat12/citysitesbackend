@@ -26,6 +26,7 @@ const db = require("../../../config/db");
 const { incrementOfferUsage } = require("../../models/offer.model");
 const { generateInvoicePdf } = require("../../services/invoice.service");
 const { getStoreStatusSettings } = require("../../models/settings.model");
+const { roundCurrency } = require("../../utils/pricing.util");
 
 async function createOrder(req, res) {
   try {
@@ -274,7 +275,7 @@ async function createOrder(req, res) {
         razorpayOrder =
           await createRazorpayOrder({
             amount:
-              Number(order.total_amount),
+              roundCurrency(order.total_amount),
 
             receipt:
               order.order_number,
@@ -459,7 +460,7 @@ async function createOrder(req, res) {
         paymentAmount:
           paymentMethod ===
             "Online Payment"
-            ? Number(
+            ? roundCurrency(
               order.total_amount
             )
             : null,
@@ -1401,7 +1402,7 @@ async function retryPaymentController(req, res) {
 
     // 5. Create new Razorpay order
     const razorpayOrder = await createRazorpayOrder({
-      amount: Number(order.total_amount),
+      amount: roundCurrency(order.total_amount),
       receipt: `${order.order_number || order.id}-R${Date.now()}`.slice(-40),
       notes: {
         local_order_id: String(order.id),
@@ -1427,7 +1428,7 @@ async function retryPaymentController(req, res) {
         orderNumber: order.order_number,
         razorpayOrderId: razorpayOrder.id,
         razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-        amount: Number(order.total_amount),
+        amount: roundCurrency(order.total_amount),
         currency: "INR",
         customerName: order.customer_name,
         customerEmail: order.customer_email,

@@ -1,5 +1,5 @@
 const db = require("../../config/db");
-const { calculateCartAndOrderPricing } = require("../utils/pricing.util");
+const { calculateCartAndOrderPricing, roundCurrency } = require("../utils/pricing.util");
 
 function generateOrderNumber() {
   const timestamp = Date.now().toString().slice(-5);
@@ -23,7 +23,7 @@ async function createOrderWithTransaction({
   offerCode = null,
   finalizeOrder = true,
 }) {
-  return db.transaction(async (trx) => {
+  return await db.transaction(async (trx) => {
     const rawCartItems = await trx("cart_items")
       .select([
         "cart_items.id as cart_item_id",
@@ -119,19 +119,19 @@ async function createOrderWithTransaction({
         delivery_address_json: deliveryAddressJson,
 
         // Pricing snapshot
-        subtotal: pricing.subtotal,
-        delivery_fee: pricing.delivery_fee,
-        discount: pricing.discount,
-        tax_amount: pricing.tax_amount,
-        packaging_fee: pricing.packaging_fee,
-        platform_fee: pricing.platform_fee,
-        cod_fee: pricing.cod_fee,
+        subtotal: roundCurrency(pricing.subtotal),
+        delivery_fee: roundCurrency(pricing.delivery_fee),
+        discount: roundCurrency(pricing.discount),
+        tax_amount: roundCurrency(pricing.tax_amount),
+        packaging_fee: roundCurrency(pricing.packaging_fee),
+        platform_fee: roundCurrency(pricing.platform_fee),
+        cod_fee: roundCurrency(pricing.cod_fee),
 
         distance_km: pricing.distance_km || 0,
 
         tax_inclusive: pricing.tax_inclusive,
 
-        total_amount: pricing.grand_total,
+        total_amount: roundCurrency(pricing.grand_total),
 
         // Store complete pricing calculation at order time
         pricing_details_json: pricing,
@@ -163,7 +163,7 @@ async function createOrderWithTransaction({
     const orderItemsToInsert = [];
 
     for (const item of enrichedItems) {
-      const price = Number(item.price) || 0;
+      const price = roundCurrency(item.price);
       const paidQuantity =
         item.paid_quantity != null
           ? Number(item.paid_quantity)
@@ -178,8 +178,8 @@ async function createOrderWithTransaction({
       // Customer is charged ONLY for the BUY / paid quantity
       const itemTotal =
         item.itemTotal != null
-          ? Number(item.itemTotal)
-          : Math.round(price * paidQuantity * 100) / 100;
+          ? roundCurrency(item.itemTotal)
+          : roundCurrency(price * paidQuantity);
 
       const isMadeToOrder =
         item.availability_type === "MADE_TO_ORDER";

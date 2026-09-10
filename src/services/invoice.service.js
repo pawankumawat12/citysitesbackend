@@ -1,5 +1,6 @@
 const PDFDocument = require("pdfkit");
 const { getFooterSettings, getOrderPricingSettings } = require("../models/settings.model");
+const { roundCurrency } = require("../utils/pricing.util");
 
 /**
  * Generates a professional PDF invoice for an order.
@@ -32,7 +33,7 @@ async function generateInvoicePdf(order, res) {
   const tableHeaderBg = "#f8fafc"; // slate-50
 
   const formatCurrency = (amount) => {
-    const num = Number(amount) || 0;
+    const num = roundCurrency(amount);
     return `Rs. ${num.toFixed(2)}`;
   };
 
@@ -203,8 +204,8 @@ async function generateInvoicePdf(order, res) {
     const itemHeight = 22;
     const name = item.name || item.product_name || "Bakery Item";
     const qty = Number(item.quantity) || 1;
-    const price = Number(item.price) || 0;
-    const itemTotal = qty * price;
+    const price = roundCurrency(item.price);
+    const itemTotal = item.total != null ? roundCurrency(item.total) : roundCurrency(qty * price);
 
     doc
       .rect(40, currentY, 515, itemHeight)
@@ -234,12 +235,14 @@ async function generateInvoicePdf(order, res) {
   const summaryBoxX = 310;
   const summaryWidth = 245;
 
-  const subtotal = Number(order.subtotal_amount) || items.reduce((acc, it) => acc + (Number(it.price) * (Number(it.quantity) || 1)), 0);
-  const discount = Number(order.discount_amount) || 0;
-  const delivery = Number(order.delivery_charge) || 0;
-  const packaging = Number(order.packaging_fee) || 0;
-  const tax = Number(order.tax_amount) || 0;
-  const grandTotal = Number(order.total_amount) || (subtotal - discount + delivery + packaging + tax);
+  const subtotal = roundCurrency(order.subtotal ?? order.subtotal_amount ?? items.reduce((acc, it) => acc + (Number(it.price) * (Number(it.quantity) || 1)), 0));
+  const discount = roundCurrency(order.discount ?? order.discount_amount ?? 0);
+  const delivery = roundCurrency(order.delivery_fee ?? order.delivery_charge ?? 0);
+  const packaging = roundCurrency(order.packaging_fee ?? 0);
+  const platform = roundCurrency(order.platform_fee ?? 0);
+  const codFee = roundCurrency(order.cod_fee ?? 0);
+  const tax = roundCurrency(order.tax_amount ?? 0);
+  const grandTotal = roundCurrency(order.total_amount ?? (subtotal - discount + delivery + packaging + platform + codFee + tax));
 
   const drawSummaryLine = (label, val, isBold = false, color = "#334155") => {
     doc

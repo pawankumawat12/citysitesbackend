@@ -13,7 +13,7 @@ const createRazorpayOrder = async ({
   notes = {},
 }) => {
   const options = {
-    amount: Math.round(Number(amount) * 100),
+    amount: Math.round((Number(amount) + Number.EPSILON) * 100),
     currency: "INR",
     receipt,
     notes,
@@ -85,7 +85,7 @@ const initiateRazorpayRefund = async ({ paymentId, amount, notes = {} }) => {
   };
 
   if (amount && Number(amount) > 0) {
-    options.amount = Math.round(Number(amount) * 100);
+    options.amount = Math.round((Number(amount) + Number.EPSILON) * 100);
   }
 
   return await razorpay.payments.refund(paymentId, options);

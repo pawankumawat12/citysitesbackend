@@ -33,6 +33,16 @@ function calculateDistanceInKm(lat1, lon1, lat2, lon2) {
 }
 
 /**
+ * Safely rounds a currency value to 2 decimal places using Math.round and Number.EPSILON
+ * to avoid floating-point precision issues.
+ */
+function roundCurrency(val) {
+  const num = Number(val);
+  if (isNaN(num) || !isFinite(num)) return 0;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
+/**
  * Computes the full pricing breakdown using getOrderPricingSettings()
  */
 async function calculateCartAndOrderPricing({
@@ -56,7 +66,7 @@ async function calculateCartAndOrderPricing({
     const qty = Number(item.quantity) || 1;
     initialRawSubtotal += price * qty;
   }
-  initialRawSubtotal = Math.round(initialRawSubtotal * 100) / 100;
+  initialRawSubtotal = roundCurrency(initialRawSubtotal);
 
   // 2. Dynamic Offer / Promo Code & BOGO Evaluation
   const offerEvaluation = await evaluateCartOffer({
@@ -163,7 +173,7 @@ async function calculateCartAndOrderPricing({
       }
     }
 
-    const itemTotal = Math.round(unitPrice * paidQty * 100) / 100;
+    const itemTotal = roundCurrency(unitPrice * paidQty);
 
     item.paid_quantity = paidQty;
     item.free_quantity = freeQty;
@@ -188,8 +198,8 @@ async function calculateCartAndOrderPricing({
     totalQuantity += extraFree;
   }
 
-  rawSubtotal = Math.round(rawSubtotal * 100) / 100;
-  totalBogoSavings = Math.round(totalBogoSavings * 100) / 100;
+  rawSubtotal = roundCurrency(rawSubtotal);
+  totalBogoSavings = roundCurrency(totalBogoSavings);
 
   // 4. Discount & Applied Offer Snapshot
   let discount = 0;
@@ -219,7 +229,7 @@ async function calculateCartAndOrderPricing({
           } Free Applied: ${freeItemsCount} Free item(s) included!`,
       };
     } else if (offerEvaluation.discount > 0) {
-      discount = Math.round(offerEvaluation.discount * 100) / 100;
+      discount = roundCurrency(offerEvaluation.discount);
       appliedOffer = {
         id: offerEvaluation.offer?.id || null,
         code: offerEvaluation.offer?.code || offerCode,
@@ -233,20 +243,20 @@ async function calculateCartAndOrderPricing({
     // Fallback to store global discount setting if set
     discountPercent = Number(settings.discount_percent) || 0;
     if (discountPercent > 0) {
-      discount = Math.round(((rawSubtotal * discountPercent) / 100) * 100) / 100;
+      discount = roundCurrency((rawSubtotal * discountPercent) / 100);
     }
   }
 
   const discountedSubtotal = Math.max(
     0,
-    Math.round((rawSubtotal - discount) * 100) / 100
+    roundCurrency(rawSubtotal - discount)
   );
 
   // 5. Minimum Order Check (against subtotal charged to customer)
-  const minimumOrderAmount = Number(settings.minimum_order_amount) || 0;
+  const minimumOrderAmount = roundCurrency(settings.minimum_order_amount);
   const isBelowMinimumOrder = rawSubtotal > 0 && rawSubtotal < minimumOrderAmount;
   const minimumOrderShortfall = isBelowMinimumOrder
-    ? Math.round((minimumOrderAmount - rawSubtotal) * 100) / 100
+    ? roundCurrency(minimumOrderAmount - rawSubtotal)
     : 0;
 
   // 4. Distance Calculation
@@ -273,15 +283,15 @@ async function calculateCartAndOrderPricing({
       : false;
 
   // 5. Delivery Fee Calculation
-  const freeDeliveryThreshold = Number(settings.free_delivery_threshold) || 0;
+  const freeDeliveryThreshold = roundCurrency(settings.free_delivery_threshold);
   const deliveryChargeType = settings.delivery_charge_type || "fixed";
-  const deliveryChargeValue = Number(settings.delivery_charge_value) || 0;
+  const deliveryChargeValue = roundCurrency(settings.delivery_charge_value);
 
   let baseDeliveryCharge = deliveryChargeValue;
   if (deliveryChargeType === "per_km" && distanceKm != null && distanceKm > 0) {
     baseDeliveryCharge = Math.max(
       deliveryChargeValue,
-      Math.round(distanceKm * deliveryChargeValue * 100) / 100
+      roundCurrency(distanceKm * deliveryChargeValue)
     );
   }
 
@@ -292,7 +302,7 @@ async function calculateCartAndOrderPricing({
   const freeDeliverySavings = isFreeDelivery ? baseDeliveryCharge : 0;
   const freeDeliveryShortfall =
     !isFreeDelivery && freeDeliveryThreshold > 0 && rawSubtotal > 0
-      ? Math.max(0, Math.round((freeDeliveryThreshold - rawSubtotal) * 100) / 100)
+      ? Math.max(0, roundCurrency(freeDeliveryThreshold - rawSubtotal))
       : 0;
 
   // 6. GST / Tax Calculation
@@ -305,39 +315,36 @@ async function calculateCartAndOrderPricing({
   if (rawSubtotal > 0 && gstPercent > 0) {
     if (taxInclusive) {
       // Tax included in product price
-      taxAmount =
-        Math.round(
-          (discountedSubtotal - discountedSubtotal / (1 + gstPercent / 100)) * 100
-        ) / 100;
+      taxAmount = roundCurrency(
+        discountedSubtotal - discountedSubtotal / (1 + gstPercent / 100)
+      );
       taxAddedToTotal = 0;
     } else {
       // Tax added on top
-      taxAmount =
-        Math.round(((discountedSubtotal * gstPercent) / 100) * 100) / 100;
+      taxAmount = roundCurrency((discountedSubtotal * gstPercent) / 100);
       taxAddedToTotal = taxAmount;
     }
   }
 
   // 7. Fees (Packaging, Platform, COD)
-  const packagingFee = rawSubtotal > 0 ? Number(settings.packaging_fee) || 0 : 0;
-  const platformFee = rawSubtotal > 0 ? Number(settings.platform_fee) || 0 : 0;
+  const packagingFee = rawSubtotal > 0 ? roundCurrency(settings.packaging_fee) : 0;
+  const platformFee = rawSubtotal > 0 ? roundCurrency(settings.platform_fee) : 0;
   const isCod = true;
-  const codFee = rawSubtotal > 0 ? Number(settings.cod_fee) || 0 : 0;
+  const codFee = rawSubtotal > 0 ? roundCurrency(settings.cod_fee) : 0;
 
   // 8. Grand Total
   let grandTotal = 0;
   if (rawSubtotal > 0) {
     grandTotal = Math.max(
       0,
-      Math.round(
-        (discountedSubtotal +
+      roundCurrency(
+        discountedSubtotal +
           taxAddedToTotal +
           deliveryFee +
           packagingFee +
           platformFee +
-          codFee) *
-          100
-      ) / 100
+          codFee
+      )
     );
   }
 
@@ -414,6 +421,7 @@ async function calculateCartAndOrderPricing({
 }
 
 module.exports = {
+  roundCurrency,
   calculateDistanceInKm,
   calculateCartAndOrderPricing,
 };

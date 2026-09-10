@@ -14,6 +14,12 @@ function parseJsonArray(val) {
   return [];
 }
 
+function roundCurrency(val) {
+  const num = Number(val);
+  if (isNaN(num) || !isFinite(num)) return 0;
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
 function normalizeOffer(row) {
   if (!row) return null;
   return {
@@ -365,11 +371,11 @@ function calculateOfferDiscount(offer, items = [], rawSubtotal = 0) {
 
   // Check minimum order requirement
   if (offer.min_order_amount > 0 && rawSubtotal < offer.min_order_amount) {
-    const shortfall = Math.round((offer.min_order_amount - rawSubtotal) * 100) / 100;
+    const shortfall = roundCurrency(offer.min_order_amount - rawSubtotal);
     return {
       isEligible: false,
       discount: 0,
-      minOrderAmount: offer.min_order_amount,
+      minOrderAmount: roundCurrency(offer.min_order_amount),
       shortfall,
       reason: `Add items worth ₹${shortfall} more to use code ${offer.code} (Min order ₹${offer.min_order_amount}).`,
     };
@@ -556,7 +562,7 @@ function calculateOfferDiscount(offer, items = [], rawSubtotal = 0) {
       return {
         isEligible: true,
         discount: 0,
-        savings: Math.round(totalSavings * 100) / 100,
+        savings: roundCurrency(totalSavings),
         free_items_count: totalFreeItems,
         bogo_items: bogoItems,
         discountedSubtotal: rawSubtotal,
@@ -570,7 +576,7 @@ function calculateOfferDiscount(offer, items = [], rawSubtotal = 0) {
           buy_qty: buyQty,
           get_qty: getQty,
           free_quantity: totalFreeItems,
-          savings: Math.round(totalSavings * 100) / 100,
+          savings: roundCurrency(totalSavings),
           description: `Buy ${buyQty} Get ${getQty} Free applied! ${totalFreeItems} free item(s) included.`,
         },
       };
@@ -582,12 +588,12 @@ function calculateOfferDiscount(offer, items = [], rawSubtotal = 0) {
   }
 
   // Ensure discount does not exceed raw subtotal
-  computedDiscount = Math.max(0, Math.min(rawSubtotal, Math.round(computedDiscount * 100) / 100));
+  computedDiscount = Math.max(0, Math.min(rawSubtotal, roundCurrency(computedDiscount)));
 
   return {
     isEligible: computedDiscount > 0,
     discount: computedDiscount,
-    discountedSubtotal: Math.max(0, Math.round((rawSubtotal - computedDiscount) * 100) / 100),
+    discountedSubtotal: Math.max(0, roundCurrency(rawSubtotal - computedDiscount)),
     offer: {
       id: offer.id,
       code: offer.code,

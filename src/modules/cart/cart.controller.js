@@ -8,7 +8,7 @@ const {
   clearCart,
 } = require("../../models/cart.model");
 const { getAddressesByUserId, getAddressById } = require("../../models/address.model");
-const { calculateCartAndOrderPricing } = require("../../utils/pricing.util");
+const { calculateCartAndOrderPricing, roundCurrency } = require("../../utils/pricing.util");
 
 function parsePositiveInteger(value) {
   const parsed = Number(value);
@@ -30,10 +30,10 @@ function parseImages(images) {
 
 function formatCartItems(rawItems) {
   return rawItems.map((item) => {
-    const price = Number(item.price) || 0;
+    const price = roundCurrency(item.price);
     const quantity = Number(item.quantity) || 0;
     const stock = Number(item.stock) || 0;
-    const itemTotal = price * quantity;
+    const itemTotal = roundCurrency(price * quantity);
     const images = parseImages(item.images);
     const availabilityType = item.availability_type || "IN_STOCK";
     const isMadeToOrder = availabilityType === "MADE_TO_ORDER";
