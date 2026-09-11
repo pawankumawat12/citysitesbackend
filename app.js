@@ -18,6 +18,8 @@ const dashboardRoutes = require("./src/modules/dashboard/dashboard.routes");
 const emailLogRoutes = require("./src/modules/emailLogs/emailLog.routes");
 const emailTemplateRoutes = require("./src/modules/emailTemplates/emailTemplate.routes");
 const heroSliderRoutes = require("./src/modules/heroSlider/heroSlider.routes");
+const whyChooseUsRoutes = require("./src/modules/whyChooseUs/whyChooseUs.routes");
+const testimonialRoutes = require("./src/modules/testimonials/testimonial.routes");
 const webhookRoutes = require("./src/modules/webhook/webhook.routes");
 const cmsRoutes = require("./src/modules/cmsPage/cmsPage.routes");
 const cookieParser = require("cookie-parser");
@@ -41,9 +43,7 @@ app.use((req, res, next) => {
 
 const rawOrigins = [
   "http://localhost:3000",
-  "http://localhost:5173",
   "http://127.0.0.1:3000",
-  "http://127.0.0.1:5173",
   process.env.FRONTEND_URL,
   process.env.ADMIN_URL,
   ...(process.env.BFF ? process.env.BFF.split(",").map((s) => s.trim()) : []),
@@ -120,6 +120,8 @@ app.use("/api/v1/dashboard", dashboardRoutes);
 app.use("/api/v1/email-logs", emailLogRoutes);
 app.use("/api/v1/email-templates", emailTemplateRoutes);
 app.use("/api/v1/hero-sliders", heroSliderRoutes);
+app.use("/api/v1/why-choose-us", whyChooseUsRoutes);
+app.use("/api/v1/testimonials", testimonialRoutes);
 app.use("/api/v1/cms", cmsRoutes);
 app.use("/api/v1/webhooks", webhookRoutes);
 app.use("/api/v1/webhook", webhookRoutes);
